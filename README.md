@@ -32,7 +32,7 @@ Built with zero C/C++ dependencies and 100% permissive (`MIT` / `Apache-2.0`) li
 - **3-Pane Interactive Terminal UI (TUI)**:
   - **Left Sidebar**: Loaded tables, auto-detected JSON shape, row count, cache status, and an expandable recursive schema tree with inferred types (`Int`, `Float`, `String`, `Bool`, `Array<T>`, `Object`).
   - **Top Bar**: SQL Query Editor (with `Up`/`Down` query history) + live Row Filter box (`f`).
-  - **Main Result Table**: Scrollable (vertical & horizontal), column-sortable (`s`), and filterable table with a popup **Row & Cell JSON Inspector** (`Enter` or `d`) for viewing deeply nested JSON values.
+  - **Main Result Table**: Scrollable (vertical & horizontal), column-sortable (`s`), filterable, and JSON type/syntax color-coded table with a scrollable, syntax-highlighted **Row & Cell JSON Inspector** (`Enter` or `d`) for viewing large or deeply nested JSON values.
 
 ---
 
@@ -93,7 +93,9 @@ Each file's stem becomes its SQL table name:
 | `s` (in Result Table) | Sort table by currently selected column (`ASC ▲` → `DESC ▼` → `Unsorted`) |
 | `f` (in Result Table) | Focus the live **Quick Row Search** input |
 | `c` (in Result Table) | Clear active row filter and interactive column sort |
-| `Enter` or `d` (in Result Table) | Open the **Row & Cell JSON Detail Inspector** modal |
+| `Enter` or `d` (in Result Table) | Open the **Row & Cell JSON Detail Inspector** modal (with JSON color coding & embedded JSON auto-formatting) |
+| `j`/`k`/`PgUp`/`PgDn`/`g`/`G` (in JSON Inspector) | Scroll vertically through large Selected Cell and Full Row JSON content |
+| `h`/`l` or `Left`/`Right` (in JSON Inspector) | Switch the inspected column cell live without closing the modal |
 | `?` or `F1` | Open keyboard shortcuts Help modal |
 | `q` or `Ctrl+C` | Quit Rustrix |
 
