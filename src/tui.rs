@@ -25,6 +25,7 @@ use ratatui::{
 };
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::io;
 use std::time::Duration;
 
@@ -124,6 +125,10 @@ pub struct TuiApp {
     pub show_detail_modal: bool,
     /// Vertical scroll offset (in visual lines) inside the Row/Cell JSON Detail Inspector modal
     pub detail_scroll_offset: usize,
+    /// Selected line cursor index inside the Row/Cell JSON Detail Inspector modal
+    pub detail_cursor_line: usize,
+    /// Set of collapsed JSON node paths inside the Row/Cell JSON Detail Inspector modal
+    pub detail_collapsed_paths: BTreeSet<String>,
     /// Whether the Help overlay modal is open
     pub show_help_modal: bool,
     /// Whether the user requested to quit
@@ -180,6 +185,8 @@ impl TuiApp {
             status_message: "Ready. Press '/' to edit SQL (with live autocomplete), 'w' on any cell to filter, 't' for SQL templates, '?' for help.".to_string(),
             show_detail_modal: false,
             detail_scroll_offset: 0,
+            detail_cursor_line: 0,
+            detail_collapsed_paths: BTreeSet::new(),
             show_help_modal: false,
             should_quit: false,
         };
@@ -307,6 +314,8 @@ impl TuiApp {
                 self.selected_col = 0;
                 self.col_scroll_offset = 0;
                 self.detail_scroll_offset = 0;
+                self.detail_cursor_line = 0;
+                self.detail_collapsed_paths.clear();
                 self.recompute_visible_rows();
                 if let SqlValidationStatus::Warning { ref message } = self.sql_validation {
                     self.status_message = format!(
@@ -514,28 +523,60 @@ impl TuiApp {
             .as_ref()
             .map(|r| r.columns.len())
             .unwrap_or(0);
+        let entries = build_detail_modal_entries(self);
+        let line_count = entries.len();
 
         match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('d') => {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                 self.show_detail_modal = false;
             }
+            KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Char('c') | KeyCode::Char('z') => {
+                self.toggle_detail_collapse_at_cursor();
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.toggle_detail_collapse_all();
+            }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(1);
+                if line_count > 0 {
+                    if self.detail_cursor_line + 1 < line_count {
+                        self.detail_cursor_line += 1;
+                    } else {
+                        self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(1);
+                    }
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(1);
+                if self.detail_cursor_line > 0 {
+                    self.detail_cursor_line -= 1;
+                } else {
+                    self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(1);
+                }
             }
             KeyCode::PageDown => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(15);
+                if line_count > 0 {
+                    let prev_cursor = self.detail_cursor_line;
+                    self.detail_cursor_line = (self.detail_cursor_line + 15).min(line_count - 1);
+                    if self.detail_cursor_line == prev_cursor {
+                        self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(15);
+                    }
+                }
             }
             KeyCode::PageUp => {
-                self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(15);
+                if self.detail_cursor_line > 0 {
+                    self.detail_cursor_line = self.detail_cursor_line.saturating_sub(15);
+                } else {
+                    self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(15);
+                }
             }
             KeyCode::Home | KeyCode::Char('g') => {
+                self.detail_cursor_line = 0;
                 self.detail_scroll_offset = 0;
             }
             KeyCode::End | KeyCode::Char('G') => {
-                let lines = build_detail_modal_lines(self);
+                if line_count > 0 {
+                    self.detail_cursor_line = line_count - 1;
+                }
+                let lines: Vec<Line<'static>> = entries.into_iter().map(|e| e.line).collect();
                 let approx_max = count_wrapped_lines(&lines, 40);
                 self.detail_scroll_offset = approx_max;
             }
@@ -545,6 +586,7 @@ impl TuiApp {
                     if self.selected_col >= self.col_scroll_offset + 6 {
                         self.col_scroll_offset = self.selected_col.saturating_sub(5);
                     }
+                    self.detail_cursor_line = 0;
                     self.detail_scroll_offset = 0;
                 }
             }
@@ -554,10 +596,98 @@ impl TuiApp {
                     if self.selected_col < self.col_scroll_offset {
                         self.col_scroll_offset = self.selected_col;
                     }
+                    self.detail_cursor_line = 0;
                     self.detail_scroll_offset = 0;
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Toggle collapse/expand state for the JSON node at `self.detail_cursor_line` in the Detail Inspector.
+    pub fn toggle_detail_collapse_at_cursor(&mut self) -> bool {
+        let entries = build_detail_modal_entries(self);
+        if entries.is_empty() {
+            return false;
+        }
+        let cursor = self.detail_cursor_line.min(entries.len() - 1);
+        let entry = &entries[cursor];
+        let target_path = match &entry.toggle_path {
+            Some(p) => p.clone(),
+            None => return false,
+        };
+        let snap_target = entry
+            .snap_to_path
+            .clone()
+            .unwrap_or_else(|| target_path.clone());
+        let was_header = entry.is_node_header;
+
+        if self.detail_collapsed_paths.contains(&target_path) {
+            self.detail_collapsed_paths.remove(&target_path);
+        } else {
+            self.detail_collapsed_paths.insert(target_path);
+        }
+
+        let new_entries = build_detail_modal_entries(self);
+        if !new_entries.is_empty() {
+            if !was_header {
+                if let Some(header_idx) = new_entries.iter().position(|e| {
+                    e.is_node_header && e.toggle_path.as_deref() == Some(snap_target.as_str())
+                }) {
+                    if header_idx < cursor {
+                        self.detail_cursor_line = header_idx;
+                    } else {
+                        self.detail_cursor_line = self.detail_cursor_line.min(new_entries.len() - 1);
+                    }
+                } else {
+                    self.detail_cursor_line = self.detail_cursor_line.min(new_entries.len() - 1);
+                }
+            } else {
+                self.detail_cursor_line = self.detail_cursor_line.min(new_entries.len() - 1);
+            }
+        } else {
+            self.detail_cursor_line = 0;
+        }
+        true
+    }
+
+    /// Toggle collapse/expand for all JSON fields/containers in the Detail Inspector (`a`).
+    pub fn toggle_detail_collapse_all(&mut self) {
+        let (field_paths, all_paths) = collect_detail_collapsible_paths(self);
+        let target_paths = if !field_paths.is_empty() {
+            &field_paths
+        } else {
+            &all_paths
+        };
+        if target_paths.is_empty() {
+            return;
+        }
+
+        let all_targets_collapsed = target_paths
+            .iter()
+            .all(|p| self.detail_collapsed_paths.contains(p));
+        let all_roots_collapsed = !all_paths.is_empty()
+            && all_paths
+                .iter()
+                .filter(|p| !p.contains('/'))
+                .all(|p| self.detail_collapsed_paths.contains(p));
+
+        if all_targets_collapsed || all_roots_collapsed {
+            self.detail_collapsed_paths.clear();
+        } else {
+            if !field_paths.is_empty() {
+                self.detail_collapsed_paths.retain(|p| p.contains('/'));
+            }
+            for p in target_paths {
+                self.detail_collapsed_paths.insert(p.clone());
+            }
+        }
+
+        let new_entries = build_detail_modal_entries(self);
+        if !new_entries.is_empty() {
+            self.detail_cursor_line = self.detail_cursor_line.min(new_entries.len() - 1);
+        } else {
+            self.detail_cursor_line = 0;
         }
     }
 
@@ -834,6 +964,7 @@ impl TuiApp {
             KeyCode::Enter | KeyCode::Char('d') => {
                 if row_count > 0 {
                     self.detail_scroll_offset = 0;
+                    self.detail_cursor_line = 0;
                     self.show_detail_modal = true;
                 }
             }
@@ -1798,6 +1929,7 @@ fn format_table_cell(val: &Value, is_selected_col: bool, is_active_cell: bool) -
 }
 
 /// Syntax-highlight a single line of JSON (pretty-printed or compact inline) using the Rustrix theme:
+/// - Fold indicators (`▾` / `▸`): `Yellow` (bold)
 /// - Object keys: `Cyan` (bold)
 /// - String values: `LightGreen`
 /// - Numeric values: `LightCyan`
@@ -1827,7 +1959,19 @@ pub fn highlight_json_line_spans(line: &str, extra_modifier: Modifier) -> Vec<Sp
             continue;
         }
 
-        // 2. Quoted JSON string (either object key or string value)
+        // 2. Fold arrows (▾ expanded, ▸ collapsed)
+        if c == '▾' || c == '▸' {
+            i += 1;
+            spans.push(Span::styled(
+                c.to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD | extra_modifier),
+            ));
+            continue;
+        }
+
+        // 3. Quoted JSON string (either object key or string value)
         if c == '"' {
             let start = i;
             i += 1;
@@ -1862,7 +2006,7 @@ pub fn highlight_json_line_spans(line: &str, extra_modifier: Modifier) -> Vec<Sp
             continue;
         }
 
-        // 3. Numeric literal
+        // 4. Numeric literal
         if c.is_ascii_digit() || (c == '-' && i + 1 < n && chars[i + 1].is_ascii_digit()) {
             let start = i;
             i += 1;
@@ -1882,7 +2026,7 @@ pub fn highlight_json_line_spans(line: &str, extra_modifier: Modifier) -> Vec<Sp
             continue;
         }
 
-        // 4. Keywords / literals (true, false, null, NULL)
+        // 5. Keywords / literals (true, false, null, NULL, field/fields/item/items)
         if c.is_alphabetic() {
             let start = i;
             while i < n && chars[i].is_alphanumeric() {
@@ -1896,6 +2040,9 @@ pub fn highlight_json_line_spans(line: &str, extra_modifier: Modifier) -> Vec<Sp
                 "null" | "NULL" => Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(extra_modifier),
+                "field" | "fields" | "item" | "items" => Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC | extra_modifier),
                 _ => Style::default()
                     .fg(Color::White)
                     .add_modifier(extra_modifier),
@@ -1904,26 +2051,295 @@ pub fn highlight_json_line_spans(line: &str, extra_modifier: Modifier) -> Vec<Sp
             continue;
         }
 
-        // 5. Braces, brackets, colons, commas, ellipsis
+        // 6. Braces, brackets, colons, commas, ellipsis
         let start = i;
         i += 1;
         let punct: String = chars[start..i].iter().collect();
+        let color = if c == '…' && i < n {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
         spans.push(Span::styled(
             punct,
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(extra_modifier),
+            Style::default().fg(color).add_modifier(extra_modifier),
         ));
     }
 
     spans
 }
 
-fn push_highlighted_json_value(out: &mut Vec<Line<'static>>, val: &Value) {
-    let pretty = serde_json::to_string_pretty(val).unwrap_or_default();
-    for line in pretty.lines() {
-        out.push(Line::from(highlight_json_line_spans(line, Modifier::empty())));
+/// A single rendered line inside the Row & Cell JSON Detail Inspector modal,
+/// paired with optional collapsible JSON node metadata for cursor-based folding.
+#[derive(Debug, Clone)]
+pub struct DetailModalEntry {
+    pub line: Line<'static>,
+    /// Node path toggled when pressing Space/Enter on this line.
+    pub toggle_path: Option<String>,
+    /// Node path whose header line the cursor should snap to when collapsing from a child/closing line.
+    pub snap_to_path: Option<String>,
+    /// Whether this line is the primary opening/collapsed header line of `toggle_path`.
+    pub is_node_header: bool,
+}
+
+fn escape_json_pointer(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn is_collapsible_json_container(val: &Value) -> bool {
+    match val {
+        Value::Object(map) => !map.is_empty(),
+        Value::Array(arr) => !arr.is_empty(),
+        _ => false,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_collapsible_json_value(
+    out: &mut Vec<DetailModalEntry>,
+    val: &Value,
+    path: &str,
+    key_prefix: Option<&str>,
+    indent_depth: usize,
+    trailing_comma: bool,
+    collapsed_paths: &BTreeSet<String>,
+    enclosing_nested_path: Option<&str>,
+) {
+    let indent = "  ".repeat(indent_depth);
+    let comma = if trailing_comma { "," } else { "" };
+    let key_part = match key_prefix {
+        Some(k) => {
+            let escaped = serde_json::to_string(k).unwrap_or_else(|_| format!("\"{}\"", k));
+            format!("{}: ", escaped)
+        }
+        None => String::new(),
+    };
+
+    match val {
+        Value::Object(map) => {
+            if map.is_empty() {
+                let text = format!("{}  {}{}{{}}{}", indent, key_part, "", comma);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&text, Modifier::empty())),
+                    toggle_path: enclosing_nested_path.map(str::to_string),
+                    snap_to_path: enclosing_nested_path.map(str::to_string),
+                    is_node_header: false,
+                });
+            } else if collapsed_paths.contains(path) {
+                let count = map.len();
+                let noun = if count == 1 { "field" } else { "fields" };
+                let text = format!("{}▸ {}{{ … {} {} }}{}", indent, key_part, count, noun, comma);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&text, Modifier::empty())),
+                    toggle_path: Some(path.to_string()),
+                    snap_to_path: Some(path.to_string()),
+                    is_node_header: true,
+                });
+            } else {
+                let open_text = format!("{}▾ {}{{", indent, key_part);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&open_text, Modifier::empty())),
+                    toggle_path: Some(path.to_string()),
+                    snap_to_path: Some(path.to_string()),
+                    is_node_header: true,
+                });
+                let child_enclosing = if indent_depth >= 1 { Some(path) } else { None };
+                let len = map.len();
+                for (idx, (k, v)) in map.iter().enumerate() {
+                    let child_comma = idx + 1 < len;
+                    let child_path = format!("{}/{}", path, escape_json_pointer(k));
+                    push_collapsible_json_value(
+                        out,
+                        v,
+                        &child_path,
+                        Some(k),
+                        indent_depth + 1,
+                        child_comma,
+                        collapsed_paths,
+                        child_enclosing,
+                    );
+                }
+                let close_text = format!("{}  }}{}", indent, comma);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&close_text, Modifier::empty())),
+                    toggle_path: Some(path.to_string()),
+                    snap_to_path: Some(path.to_string()),
+                    is_node_header: false,
+                });
+            }
+        }
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                let text = format!("{}  {}[]{}", indent, key_part, comma);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&text, Modifier::empty())),
+                    toggle_path: enclosing_nested_path.map(str::to_string),
+                    snap_to_path: enclosing_nested_path.map(str::to_string),
+                    is_node_header: false,
+                });
+            } else if collapsed_paths.contains(path) {
+                let count = arr.len();
+                let noun = if count == 1 { "item" } else { "items" };
+                let text = format!("{}▸ {}[ … {} {} ]{}", indent, key_part, count, noun, comma);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&text, Modifier::empty())),
+                    toggle_path: Some(path.to_string()),
+                    snap_to_path: Some(path.to_string()),
+                    is_node_header: true,
+                });
+            } else {
+                let open_text = format!("{}▾ {}[", indent, key_part);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&open_text, Modifier::empty())),
+                    toggle_path: Some(path.to_string()),
+                    snap_to_path: Some(path.to_string()),
+                    is_node_header: true,
+                });
+                let child_enclosing = if indent_depth >= 1 { Some(path) } else { None };
+                let len = arr.len();
+                for (idx, v) in arr.iter().enumerate() {
+                    let child_comma = idx + 1 < len;
+                    let child_path = format!("{}/{}", path, idx);
+                    push_collapsible_json_value(
+                        out,
+                        v,
+                        &child_path,
+                        None,
+                        indent_depth + 1,
+                        child_comma,
+                        collapsed_paths,
+                        child_enclosing,
+                    );
+                }
+                let close_text = format!("{}  ]{}", indent, comma);
+                out.push(DetailModalEntry {
+                    line: Line::from(highlight_json_line_spans(&close_text, Modifier::empty())),
+                    toggle_path: Some(path.to_string()),
+                    snap_to_path: Some(path.to_string()),
+                    is_node_header: false,
+                });
+            }
+        }
+        _ => {
+            let val_str = serde_json::to_string(val).unwrap_or_default();
+            let text = if indent_depth == 0 && key_prefix.is_none() {
+                val_str
+            } else {
+                format!("{}  {}{}{}", indent, key_part, val_str, comma)
+            };
+            out.push(DetailModalEntry {
+                line: Line::from(highlight_json_line_spans(&text, Modifier::empty())),
+                toggle_path: enclosing_nested_path.map(str::to_string),
+                snap_to_path: enclosing_nested_path.map(str::to_string),
+                is_node_header: false,
+            });
+        }
+    }
+}
+
+fn collect_json_collapsible_paths_recursive(
+    val: &Value,
+    path: &str,
+    depth: usize,
+    field_paths: &mut Vec<String>,
+    all_paths: &mut Vec<String>,
+) {
+    match val {
+        Value::Object(map) if !map.is_empty() => {
+            all_paths.push(path.to_string());
+            if depth >= 1 {
+                field_paths.push(path.to_string());
+            }
+            for (k, v) in map {
+                let child_path = format!("{}/{}", path, escape_json_pointer(k));
+                collect_json_collapsible_paths_recursive(
+                    v,
+                    &child_path,
+                    depth + 1,
+                    field_paths,
+                    all_paths,
+                );
+            }
+        }
+        Value::Array(arr) if !arr.is_empty() => {
+            all_paths.push(path.to_string());
+            if depth >= 1 {
+                field_paths.push(path.to_string());
+            }
+            for (idx, v) in arr.iter().enumerate() {
+                let child_path = format!("{}/{}", path, idx);
+                collect_json_collapsible_paths_recursive(
+                    v,
+                    &child_path,
+                    depth + 1,
+                    field_paths,
+                    all_paths,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect `(field_collapsible_paths, all_collapsible_paths)` for the active row & cell in the Detail Inspector.
+fn collect_detail_collapsible_paths(app: &TuiApp) -> (Vec<String>, Vec<String>) {
+    let mut field_paths = Vec::new();
+    let mut all_paths = Vec::new();
+
+    let res = match &app.current_result {
+        Some(r) => r,
+        None => return (field_paths, all_paths),
+    };
+    let &actual_row_idx = match app.visible_row_indices.get(app.selected_row) {
+        Some(i) => i,
+        None => return (field_paths, all_paths),
+    };
+    let row = &res.rows[actual_row_idx];
+    let mut row_obj = Map::new();
+    for (col, val) in res.columns.iter().zip(row.iter()) {
+        row_obj.insert(col.clone(), val.clone());
+    }
+
+    let selected_col_name = res
+        .columns
+        .get(app.selected_col)
+        .cloned()
+        .unwrap_or_default();
+    let selected_val = row.get(app.selected_col).cloned().unwrap_or(Value::Null);
+    let cell_root_path = format!("cell:{}", escape_json_pointer(&selected_col_name));
+
+    match &selected_val {
+        Value::String(s) => {
+            if let Some(embedded_json) = try_parse_embedded_json(s) {
+                collect_json_collapsible_paths_recursive(
+                    &embedded_json,
+                    &cell_root_path,
+                    0,
+                    &mut field_paths,
+                    &mut all_paths,
+                );
+            }
+        }
+        _ => {
+            collect_json_collapsible_paths_recursive(
+                &selected_val,
+                &cell_root_path,
+                0,
+                &mut field_paths,
+                &mut all_paths,
+            );
+        }
+    }
+
+    collect_json_collapsible_paths_recursive(
+        &Value::Object(row_obj),
+        "row",
+        0,
+        &mut field_paths,
+        &mut all_paths,
+    );
+
+    (field_paths, all_paths)
 }
 
 /// Try to parse an embedded JSON object or array from a string cell value.
@@ -1940,8 +2356,8 @@ fn try_parse_embedded_json(s: &str) -> Option<Value> {
     }
 }
 
-/// Build the syntax-highlighted lines for the Row & Cell JSON Detail Inspector modal.
-pub fn build_detail_modal_lines(app: &TuiApp) -> Vec<Line<'static>> {
+/// Build the structured line entries (with collapsible node metadata) for the Row & Cell JSON Detail Inspector modal.
+pub fn build_detail_modal_entries(app: &TuiApp) -> Vec<DetailModalEntry> {
     let res = match &app.current_result {
         Some(r) => r,
         None => return Vec::new(),
@@ -1962,116 +2378,266 @@ pub fn build_detail_modal_lines(app: &TuiApp) -> Vec<Line<'static>> {
         .cloned()
         .unwrap_or_default();
     let selected_val = row.get(app.selected_col).cloned().unwrap_or(Value::Null);
+    let cell_root_path = format!("cell:{}", escape_json_pointer(&selected_col_name));
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut entries: Vec<DetailModalEntry> = Vec::new();
 
     match &selected_val {
         Value::String(s) => {
             if let Some(embedded_json) = try_parse_embedded_json(s) {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("Selected Cell [{}]", selected_col_name),
+                let root_toggle =
+                    is_collapsible_json_container(&embedded_json).then(|| cell_root_path.clone());
+                entries.push(DetailModalEntry {
+                    line: Line::from(vec![
+                        Span::styled(
+                            format!("Selected Cell [{}]", selected_col_name),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            " (JSON string):",
+                            Style::default()
+                                .fg(Color::LightCyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    toggle_path: root_toggle.clone(),
+                    snap_to_path: root_toggle,
+                    is_node_header: false,
+                });
+                push_collapsible_json_value(
+                    &mut entries,
+                    &embedded_json,
+                    &cell_root_path,
+                    None,
+                    0,
+                    false,
+                    &app.detail_collapsed_paths,
+                    None,
+                );
+            } else if s.contains('\n') {
+                entries.push(DetailModalEntry {
+                    line: Line::from(Span::styled(
+                        format!("Selected Cell [{}]:", selected_col_name),
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        " (JSON string):",
-                        Style::default()
-                            .fg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-                push_highlighted_json_value(&mut lines, &embedded_json);
-            } else if s.contains('\n') {
-                lines.push(Line::from(Span::styled(
-                    format!("Selected Cell [{}]:", selected_col_name),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )));
+                    )),
+                    toggle_path: None,
+                    snap_to_path: None,
+                    is_node_header: false,
+                });
                 for raw_line in s.lines() {
-                    lines.push(Line::from(Span::styled(
-                        raw_line.to_string(),
-                        Style::default().fg(Color::LightGreen),
-                    )));
+                    entries.push(DetailModalEntry {
+                        line: Line::from(Span::styled(
+                            raw_line.to_string(),
+                            Style::default().fg(Color::LightGreen),
+                        )),
+                        toggle_path: None,
+                        snap_to_path: None,
+                        is_node_header: false,
+                    });
                 }
             } else {
-                lines.push(Line::from(Span::styled(
-                    format!("Selected Cell [{}]:", selected_col_name),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                push_highlighted_json_value(&mut lines, &selected_val);
+                entries.push(DetailModalEntry {
+                    line: Line::from(Span::styled(
+                        format!("Selected Cell [{}]:", selected_col_name),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    toggle_path: None,
+                    snap_to_path: None,
+                    is_node_header: false,
+                });
+                push_collapsible_json_value(
+                    &mut entries,
+                    &selected_val,
+                    &cell_root_path,
+                    None,
+                    0,
+                    false,
+                    &app.detail_collapsed_paths,
+                    None,
+                );
             }
         }
         _ => {
-            lines.push(Line::from(Span::styled(
-                format!("Selected Cell [{}]:", selected_col_name),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            push_highlighted_json_value(&mut lines, &selected_val);
+            let root_toggle =
+                is_collapsible_json_container(&selected_val).then(|| cell_root_path.clone());
+            entries.push(DetailModalEntry {
+                line: Line::from(Span::styled(
+                    format!("Selected Cell [{}]:", selected_col_name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                toggle_path: root_toggle.clone(),
+                snap_to_path: root_toggle,
+                is_node_header: false,
+            });
+            push_collapsible_json_value(
+                &mut entries,
+                &selected_val,
+                &cell_root_path,
+                None,
+                0,
+                false,
+                &app.detail_collapsed_paths,
+                None,
+            );
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("Full Row JSON (Row #{}):", actual_row_idx + 1),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )));
-    push_highlighted_json_value(&mut lines, &Value::Object(row_obj));
+    entries.push(DetailModalEntry {
+        line: Line::from(""),
+        toggle_path: None,
+        snap_to_path: None,
+        is_node_header: false,
+    });
 
-    lines
+    let row_val = Value::Object(row_obj);
+    let row_toggle = is_collapsible_json_container(&row_val).then(|| "row".to_string());
+    entries.push(DetailModalEntry {
+        line: Line::from(Span::styled(
+            format!("Full Row JSON (Row #{}):", actual_row_idx + 1),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        toggle_path: row_toggle.clone(),
+        snap_to_path: row_toggle,
+        is_node_header: false,
+    });
+    push_collapsible_json_value(
+        &mut entries,
+        &row_val,
+        "row",
+        None,
+        0,
+        false,
+        &app.detail_collapsed_paths,
+        None,
+    );
+
+    entries
+}
+
+/// Build the syntax-highlighted lines for the Row & Cell JSON Detail Inspector modal.
+pub fn build_detail_modal_lines(app: &TuiApp) -> Vec<Line<'static>> {
+    build_detail_modal_entries(app)
+        .into_iter()
+        .map(|e| e.line)
+        .collect()
+}
+
+/// Compute the visual wrapped height of a single [`Line`] at `wrap_width`.
+fn line_wrapped_height(line: &Line<'_>, wrap_width: u16) -> usize {
+    let width = (wrap_width as usize).max(1);
+    let char_len: usize = line
+        .spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum();
+    if char_len == 0 {
+        1
+    } else {
+        char_len.div_ceil(width)
+    }
 }
 
 /// Compute the total number of visual lines after soft-wrapping `lines` to `wrap_width` columns.
 fn count_wrapped_lines(lines: &[Line<'_>], wrap_width: u16) -> usize {
-    let width = (wrap_width as usize).max(1);
     lines
         .iter()
-        .map(|line| {
-            let char_len: usize = line
-                .spans
-                .iter()
-                .map(|s| s.content.chars().count())
-                .sum();
-            if char_len == 0 {
-                1
-            } else {
-                char_len.div_ceil(width)
-            }
-        })
+        .map(|line| line_wrapped_height(line, wrap_width))
         .sum::<usize>()
         .max(1)
 }
 
 fn draw_detail_modal(frame: &mut Frame, app: &mut TuiApp) {
-    let lines = build_detail_modal_lines(app);
-    if lines.is_empty() {
+    let entries = build_detail_modal_entries(app);
+    if entries.is_empty() {
         return;
     }
 
     let area = centered_rect(70, 75, frame.area());
     frame.render_widget(Clear, area);
 
+    let total_entries = entries.len();
+    app.detail_cursor_line = app.detail_cursor_line.min(total_entries - 1);
+
     let inner_width = area.width.saturating_sub(2).max(1);
     let inner_height = (area.height.saturating_sub(2) as usize).max(1);
-    let total_visual_lines = count_wrapped_lines(&lines, inner_width);
+
+    let mut cursor_visual_start = 0usize;
+    let mut cursor_visual_height = 1usize;
+    let mut total_visual_lines = 0usize;
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let h = line_wrapped_height(&entry.line, inner_width);
+        if idx == app.detail_cursor_line {
+            cursor_visual_start = total_visual_lines;
+            cursor_visual_height = h;
+        }
+        total_visual_lines += h;
+    }
+    total_visual_lines = total_visual_lines.max(1);
+    let cursor_visual_end = cursor_visual_start + cursor_visual_height;
     let max_scroll = total_visual_lines.saturating_sub(inner_height);
+
+    if cursor_visual_start < app.detail_scroll_offset {
+        app.detail_scroll_offset = cursor_visual_start;
+    } else if cursor_visual_height <= inner_height {
+        if cursor_visual_end > app.detail_scroll_offset + inner_height {
+            app.detail_scroll_offset = cursor_visual_end.saturating_sub(inner_height);
+        }
+    } else if cursor_visual_start >= app.detail_scroll_offset + inner_height {
+        app.detail_scroll_offset = cursor_visual_start;
+    }
 
     app.detail_scroll_offset = app.detail_scroll_offset.min(max_scroll);
     let scroll_y = app.detail_scroll_offset.min(u16::MAX as usize) as u16;
 
-    let current_top = (app.detail_scroll_offset + 1).min(total_visual_lines);
-    let current_bottom = (app.detail_scroll_offset + inner_height).min(total_visual_lines);
+    let highlight_bg = Color::Rgb(45, 68, 102);
+    let lines: Vec<Line<'static>> = entries
+        .into_iter()
+        .enumerate()
+        .map(|(idx, entry)| {
+            if idx == app.detail_cursor_line {
+                let spans: Vec<Span<'static>> = if entry.line.spans.is_empty()
+                    || entry.line.spans.iter().all(|s| s.content.is_empty())
+                {
+                    vec![Span::styled(" ", Style::default().bg(highlight_bg))]
+                } else {
+                    entry
+                        .line
+                        .spans
+                        .into_iter()
+                        .map(|mut s| {
+                            s.style = s.style.bg(highlight_bg);
+                            s
+                        })
+                        .collect()
+                };
+                Line::from(spans).style(Style::default().bg(highlight_bg))
+            } else {
+                entry.line
+            }
+        })
+        .collect();
+
+    let fold_badge = if app.detail_collapsed_paths.is_empty() {
+        String::new()
+    } else {
+        format!(" [{} collapsed]", app.detail_collapsed_paths.len())
+    };
     let title = format!(
-        " Row & Cell JSON Inspector [Lines {}-{}/{}] (j/k/PgUp/PgDn/g/G:Scroll  h/l:Col  Esc/Enter:Close) ",
-        current_top, current_bottom, total_visual_lines
+        " Row & Cell JSON Inspector [Line {}/{}{}] (j/k:Move  Space/Enter:Fold  a:FoldAll  h/l:Col  Esc/q:Close) ",
+        app.detail_cursor_line + 1,
+        total_entries,
+        fold_badge
     );
 
     let block = Block::default()
@@ -2109,7 +2675,7 @@ Keyboard Shortcuts & Guided SQL Assistant:
   f                 Focus Quick Row Search input (live text search)
   c                 Clear active row search and column sort
   Enter or d        Open JSON Detail Inspector for current row & cell
-                    (In Inspector: j/k/PgUp/PgDn/g/G:Scroll  h/l:Switch Column)
+                    (In Inspector: j/k:Move  Space/Enter:Fold  a:FoldAll  h/l:Col)
   ? or F1           Toggle this Help modal
   q or Ctrl+C       Quit Rustrix";
 
@@ -2444,17 +3010,18 @@ mod tests {
         app.selected_col = 1;
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.show_detail_modal);
+        assert_eq!(app.detail_cursor_line, 0);
         assert_eq!(app.detail_scroll_offset, 0);
 
-        // Scroll down with 'j', Down, and PageDown
+        // Move line cursor down with 'j', Down, and PageDown
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.detail_scroll_offset, 1);
+        assert_eq!(app.detail_cursor_line, 1);
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.detail_scroll_offset, 2);
+        assert_eq!(app.detail_cursor_line, 2);
         app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.detail_scroll_offset, 17);
+        assert_eq!(app.detail_cursor_line, 17);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-        assert_eq!(app.detail_scroll_offset, 16);
+        assert_eq!(app.detail_cursor_line, 16);
 
         // Jump to bottom ('G') and verify draw_tui clamps scroll offset to max_scroll
         app.handle_key_event(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
@@ -2465,13 +3032,15 @@ mod tests {
 
         // Jump back to top ('g')
         app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.detail_cursor_line, 0);
         assert_eq!(app.detail_scroll_offset, 0);
 
         // Switch column inside modal with Right ('l') to 'embedded' (col 2)
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert_eq!(app.detail_scroll_offset, 1);
+        assert_eq!(app.detail_cursor_line, 1);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
         assert_eq!(app.selected_col, 2);
+        assert_eq!(app.detail_cursor_line, 0);
         assert_eq!(app.detail_scroll_offset, 0);
 
         // Verify embedded JSON string is detected and pretty-printed
@@ -2510,5 +3079,97 @@ mod tests {
         assert_eq!(find_color("\"Alice\""), Some(Color::LightGreen));
         assert_eq!(find_color("null"), Some(Color::DarkGray));
         assert_eq!(find_color(":"), Some(Color::Gray));
+    }
+
+    #[test]
+    fn test_detail_modal_json_collapse_and_expand() {
+        let tmp = TempDir::new().unwrap();
+        let mut engine = QueryEngine::new();
+        let (name, path) = parse_file_spec("examples/users.json");
+        let table = load_json_file(&name, &path, Some(tmp.path()), false).unwrap();
+        engine.register_table(table);
+
+        let mut app = TuiApp::new(engine);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Select column 6 ('address') on Row 0 (Alice Vance) and open Detail Inspector
+        app.selected_row = 0;
+        app.selected_col = 6;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.show_detail_modal);
+
+        let lines_to_strings = |app: &TuiApp| -> Vec<String> {
+            build_detail_modal_lines(app)
+                .into_iter()
+                .map(|l| l.spans.into_iter().map(|s| s.content.into_owned()).collect())
+                .collect()
+        };
+
+        let initial_lines = lines_to_strings(&app);
+        assert!(initial_lines.iter().any(|l| l.contains("▾ \"address\": {")));
+        assert!(initial_lines.iter().any(|l| l.contains("▾ \"tags\": [")));
+        assert!(initial_lines.iter().any(|l| l.contains("\"city\": \"Seattle\"")));
+
+        // 1. Move cursor to line 1 (`▾ {` of Selected Cell [address]) and press Space to collapse it
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.detail_cursor_line, 1);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let after_cell_collapse = lines_to_strings(&app);
+        assert!(after_cell_collapse.iter().any(|l| l.contains("▸ { … 3 fields }")));
+
+        // Press Enter to expand Selected Cell [address] back
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.show_detail_modal, "Enter inside inspector toggles fold rather than closing");
+        assert!(app.detail_collapsed_paths.is_empty());
+
+        // 2. Navigate down to `"address": {` inside Full Row JSON and collapse it
+        let entries = build_detail_modal_entries(&app);
+        let row_addr_idx = entries
+            .iter()
+            .position(|e| e.is_node_header && e.toggle_path.as_deref() == Some("row/address"))
+            .expect("row/address header line should exist");
+        app.detail_cursor_line = row_addr_idx;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        let after_row_addr_collapse = lines_to_strings(&app);
+        assert!(after_row_addr_collapse
+            .iter()
+            .any(|l| l.contains("▸ \"address\": { … 3 fields },")));
+
+        // 3. Test collapsing from a child line inside `"tags"` (snaps cursor to `"tags"` header)
+        let entries = build_detail_modal_entries(&app);
+        let tag_child_idx = entries
+            .iter()
+            .position(|e| !e.is_node_header && e.toggle_path.as_deref() == Some("row/tags"))
+            .expect("row/tags child line should exist");
+        let tag_header_idx = entries
+            .iter()
+            .position(|e| e.is_node_header && e.toggle_path.as_deref() == Some("row/tags"))
+            .expect("row/tags header line should exist");
+        app.detail_cursor_line = tag_child_idx;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.detail_cursor_line, tag_header_idx,
+            "Collapsing from inside a nested array should snap cursor to its header line"
+        );
+        let after_tags_collapse = lines_to_strings(&app);
+        assert!(after_tags_collapse
+            .iter()
+            .any(|l| l.contains("▸ \"tags\": [ … 3 items ]")));
+
+        // 4. Press 'a' when all row fields are collapsed -> expands all!
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.detail_collapsed_paths.is_empty());
+
+        // Press 'a' again -> collapses all fields!
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.detail_collapsed_paths.contains("row/address"));
+        assert!(app.detail_collapsed_paths.contains("row/tags"));
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+
+        // 5. Close inspector with 'q'
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.show_detail_modal);
     }
 }
