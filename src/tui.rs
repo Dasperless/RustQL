@@ -30,6 +30,12 @@ use std::time::Duration;
 
 use crate::cli::value_to_display_string;
 use crate::engine::{compare_json_values, QueryEngine, QueryResult};
+use crate::sql_helper::{
+    build_cell_quick_actions, build_sql_templates, collect_field_sample_values,
+    compute_sql_suggestions, diagnose_sql_error, format_sql_literal, highlight_sql_line,
+    merge_where_condition, validate_sql_live, QuickFilterAction, SqlSuggestion, SqlTemplateRecipe,
+    SqlValidationStatus,
+};
 
 /// Active pane focus in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +69,29 @@ pub struct TuiApp {
     pub query_history: Vec<String>,
     /// Current index in `query_history` when browsing with Up/Down (`None` = editing latest)
     pub history_index: Option<usize>,
+
+    /// Live SQL syntax & schema validation status
+    pub sql_validation: SqlValidationStatus,
+    /// Context-aware autocomplete suggestions for the current cursor position
+    pub sql_suggestions: Vec<SqlSuggestion>,
+    /// Selected index in `sql_suggestions`
+    pub suggestion_selected: usize,
+    /// Whether the autocomplete dropdown popup is currently visible
+    pub show_suggestions: bool,
+
+    /// Whether the cell Quick-Filter modal (`w`) is open
+    pub show_quick_filter_modal: bool,
+    /// Generated quick-filter actions for the currently selected table cell
+    pub quick_filter_actions: Vec<QuickFilterAction>,
+    /// Selected index in `quick_filter_actions`
+    pub quick_filter_selected: usize,
+
+    /// Whether the SQL Recipe & Template Picker modal (`t` / `Ctrl+T`) is open
+    pub show_template_modal: bool,
+    /// Schema-tailored SQL recipes
+    pub sql_templates: Vec<SqlTemplateRecipe>,
+    /// Selected index in `sql_templates`
+    pub template_selected: usize,
 
     /// Live filter text applied to the displayed result rows
     pub filter_input: String,
@@ -115,6 +144,8 @@ impl TuiApp {
         };
         let sql_cursor = initial_sql.chars().count();
         let schema_entries = build_schema_entries(&engine);
+        let initial_validation = validate_sql_live(&initial_sql, &engine);
+        let sql_templates = build_sql_templates(&engine);
 
         let mut app = Self {
             engine,
@@ -123,6 +154,16 @@ impl TuiApp {
             sql_cursor,
             query_history: Vec::new(),
             history_index: None,
+            sql_validation: initial_validation,
+            sql_suggestions: Vec::new(),
+            suggestion_selected: 0,
+            show_suggestions: false,
+            show_quick_filter_modal: false,
+            quick_filter_actions: Vec::new(),
+            quick_filter_selected: 0,
+            show_template_modal: false,
+            sql_templates,
+            template_selected: 0,
             filter_input: String::new(),
             current_result: None,
             visible_row_indices: Vec::new(),
@@ -134,7 +175,7 @@ impl TuiApp {
             schema_selected: 0,
             schema_entries,
             error_message: None,
-            status_message: "Ready. Press '/' or 'e' to edit SQL, 's' to sort column, 'f' to filter rows, 'Enter' to inspect JSON, 'q' to quit.".to_string(),
+            status_message: "Ready. Press '/' to edit SQL (with live autocomplete), 'w' on any cell to filter, 't' for SQL templates, '?' for help.".to_string(),
             show_detail_modal: false,
             show_help_modal: false,
             should_quit: false,
@@ -144,13 +185,106 @@ impl TuiApp {
         app
     }
 
+    /// Recompute live SQL validation and context-aware autocomplete suggestions.
+    pub fn refresh_sql_assistant(&mut self, open_popup: bool) {
+        self.sql_validation = validate_sql_live(&self.sql_input, &self.engine);
+        self.sql_suggestions =
+            compute_sql_suggestions(&self.sql_input, self.sql_cursor, &self.engine);
+        if self.suggestion_selected >= self.sql_suggestions.len() {
+            self.suggestion_selected = 0;
+        }
+        self.show_suggestions = open_popup && !self.sql_suggestions.is_empty();
+    }
+
+    /// Accept the currently highlighted autocomplete suggestion in `self.sql_suggestions`.
+    pub fn accept_selected_suggestion(&mut self) -> bool {
+        if !self.show_suggestions || self.sql_suggestions.is_empty() {
+            return false;
+        }
+        let idx = self
+            .suggestion_selected
+            .min(self.sql_suggestions.len().saturating_sub(1));
+        let sug = self.sql_suggestions[idx].clone();
+
+        let chars: Vec<char> = self.sql_input.chars().collect();
+        let pos = self.sql_cursor.min(chars.len());
+        let replace_start = pos.saturating_sub(sug.replace_prefix_len);
+
+        let mut new_sql: String = chars[..replace_start].iter().collect();
+        new_sql.push_str(&sug.insert_text);
+        let new_cursor = new_sql.chars().count();
+
+        // Skip duplicating a leading space if the character immediately after cursor is already whitespace
+        let mut tail_slice = &chars[pos..];
+        if sug.insert_text.ends_with(' ') && tail_slice.first() == Some(&' ') {
+            tail_slice = &tail_slice[1..];
+        }
+        let tail: String = tail_slice.iter().collect();
+        new_sql.push_str(&tail);
+
+        self.sql_input = new_sql;
+        self.sql_cursor = new_cursor;
+        self.suggestion_selected = 0;
+        self.refresh_sql_assistant(true);
+        true
+    }
+
+    /// Open the one-key Quick Filter & Action menu (`w`) for the currently selected cell in the Result Table.
+    pub fn open_quick_filter_for_selected_cell(&mut self) {
+        let res = match &self.current_result {
+            Some(r) if !r.columns.is_empty() && !self.visible_row_indices.is_empty() => r,
+            _ => {
+                self.status_message =
+                    "No active table cell to filter — press 't' to open SQL Templates instead."
+                        .to_string();
+                return;
+            }
+        };
+
+        let col_idx = self.selected_col.min(res.columns.len() - 1);
+        let col_name = res.columns[col_idx].clone();
+        let actual_row_idx = self.visible_row_indices[self.selected_row];
+        let cell_val = res.rows[actual_row_idx]
+            .get(col_idx)
+            .cloned()
+            .unwrap_or(Value::Null);
+
+        let first_table = self.engine.tables().first().copied();
+        let table_name = first_table
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "data".to_string());
+        let table_rows = first_table.map(|t| t.rows.len()).unwrap_or(0);
+
+        self.quick_filter_actions = build_cell_quick_actions(
+            &self.sql_input,
+            &table_name,
+            &col_name,
+            &cell_val,
+            table_rows,
+        );
+        self.quick_filter_selected = 0;
+        self.show_quick_filter_modal = !self.quick_filter_actions.is_empty();
+    }
+
+    /// Open the interactive SQL Template & Recipe Picker modal (`t` or `Ctrl+T`).
+    pub fn open_template_picker(&mut self) {
+        self.sql_templates = build_sql_templates(&self.engine);
+        if self.template_selected >= self.sql_templates.len() {
+            self.template_selected = 0;
+        }
+        self.show_template_modal = true;
+    }
+
     /// Execute `self.sql_input` against `self.engine` and update result state.
     pub fn execute_current_sql(&mut self) {
+        self.show_suggestions = false;
         let query = self.sql_input.trim().to_string();
         if query.is_empty() {
             self.error_message = Some("SQL query cannot be empty.".to_string());
             return;
         }
+
+        self.sql_validation = validate_sql_live(&query, &self.engine);
 
         // Record in history if distinct from last entry
         if self.query_history.last().map(|s| s.as_str()) != Some(query.as_str()) {
@@ -170,14 +304,23 @@ impl TuiApp {
                 self.selected_col = 0;
                 self.col_scroll_offset = 0;
                 self.recompute_visible_rows();
-                self.status_message = format!(
-                    "Executed in {:.2} ms — {} row(s) returned.",
-                    elapsed, row_count
-                );
+                if let SqlValidationStatus::Warning { ref message } = self.sql_validation {
+                    self.status_message = format!(
+                        "Executed in {:.2} ms — {} row(s). {}",
+                        elapsed, row_count, message
+                    );
+                } else {
+                    self.status_message = format!(
+                        "Executed in {:.2} ms — {} row(s) returned. (Press 'w' on any cell to filter, 't' for SQL templates)",
+                        elapsed, row_count
+                    );
+                }
             }
             Err(err) => {
-                self.error_message = Some(err.to_string());
-                self.status_message = "Query error — see error banner above.".to_string();
+                let friendly = diagnose_sql_error(&query, &err.to_string(), &self.engine);
+                self.error_message = Some(friendly);
+                self.status_message =
+                    "Query error — see hint above, or press Ctrl+T for SQL templates.".to_string();
             }
         }
     }
@@ -271,11 +414,21 @@ impl TuiApp {
             return;
         }
 
-        // If help modal or detail modal is open, any Esc/Enter/q closes it
+        // Global Ctrl+T opens SQL Template & Recipe Picker
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+            self.open_template_picker();
+            return;
+        }
+
+        // If help modal or detail modal is open, handle closing it
         if self.show_help_modal {
             if matches!(
                 key.code,
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::F(1)
+                KeyCode::Esc
+                    | KeyCode::Enter
+                    | KeyCode::Char('q')
+                    | KeyCode::Char('?')
+                    | KeyCode::F(1)
             ) {
                 self.show_help_modal = false;
             }
@@ -292,17 +445,40 @@ impl TuiApp {
             return;
         }
 
+        if self.show_quick_filter_modal {
+            self.handle_quick_filter_modal_key(key);
+            return;
+        }
+
+        if self.show_template_modal {
+            self.handle_template_modal_key(key);
+            return;
+        }
+
         // Global F1 for help
         if key.code == KeyCode::F(1) {
             self.show_help_modal = true;
             return;
         }
 
+        // Tab in SQL input accepts autocomplete suggestion when dropdown is open
+        if key.code == KeyCode::Tab
+            && self.focus == FocusPane::SqlInput
+            && self.show_suggestions
+            && self.accept_selected_suggestion()
+        {
+            return;
+        }
+
         // Tab / BackTab cycles focus across panes
         match key.code {
             KeyCode::Tab => {
+                self.show_suggestions = false;
                 self.focus = match self.focus {
-                    FocusPane::ResultTable => FocusPane::SqlInput,
+                    FocusPane::ResultTable => {
+                        self.refresh_sql_assistant(false);
+                        FocusPane::SqlInput
+                    }
                     FocusPane::SqlInput => FocusPane::FilterInput,
                     FocusPane::FilterInput => FocusPane::SchemaBrowser,
                     FocusPane::SchemaBrowser => FocusPane::ResultTable,
@@ -310,10 +486,14 @@ impl TuiApp {
                 return;
             }
             KeyCode::BackTab => {
+                self.show_suggestions = false;
                 self.focus = match self.focus {
                     FocusPane::ResultTable => FocusPane::SchemaBrowser,
                     FocusPane::SchemaBrowser => FocusPane::FilterInput,
-                    FocusPane::FilterInput => FocusPane::SqlInput,
+                    FocusPane::FilterInput => {
+                        self.refresh_sql_assistant(false);
+                        FocusPane::SqlInput
+                    }
                     FocusPane::SqlInput => FocusPane::ResultTable,
                 };
                 return;
@@ -329,6 +509,109 @@ impl TuiApp {
         }
     }
 
+    fn handle_quick_filter_modal_key(&mut self, key: KeyEvent) {
+        let count = self.quick_filter_actions.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('w') => {
+                self.show_quick_filter_modal = false;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if count > 0 {
+                    self.quick_filter_selected = (self.quick_filter_selected + 1) % count;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if count > 0 {
+                    self.quick_filter_selected =
+                        (self.quick_filter_selected + count - 1) % count;
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(action) = self.quick_filter_actions.get(self.quick_filter_selected) {
+                    self.sql_input = action.sql.clone();
+                    self.sql_cursor = self.sql_input.chars().count();
+                    self.show_quick_filter_modal = false;
+                    self.execute_current_sql();
+                    self.focus = FocusPane::ResultTable;
+                }
+            }
+            KeyCode::Char('e') | KeyCode::Char('/') => {
+                if let Some(action) = self.quick_filter_actions.get(self.quick_filter_selected) {
+                    self.sql_input = action.sql.clone();
+                    self.sql_cursor = self.sql_input.chars().count();
+                    self.show_quick_filter_modal = false;
+                    self.focus = FocusPane::SqlInput;
+                    self.refresh_sql_assistant(false);
+                }
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if let Some(action) = self.quick_filter_actions.get(idx) {
+                    self.sql_input = action.sql.clone();
+                    self.sql_cursor = self.sql_input.chars().count();
+                    self.show_quick_filter_modal = false;
+                    self.execute_current_sql();
+                    self.focus = FocusPane::ResultTable;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_template_modal_key(&mut self, key: KeyEvent) {
+        let count = self.sql_templates.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t') => {
+                self.show_template_modal = false;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if count > 0 {
+                    self.template_selected = (self.template_selected + 1) % count;
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if count > 0 {
+                    self.template_selected = (self.template_selected + count - 1) % count;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('e') => {
+                // Load recipe into SQL input bar and focus it for editing/execution
+                if let Some(tpl) = self.sql_templates.get(self.template_selected).cloned() {
+                    self.sql_input = tpl.sql;
+                    self.sql_cursor = self.sql_input.chars().count();
+                    self.show_template_modal = false;
+                    self.focus = FocusPane::SqlInput;
+                    self.refresh_sql_assistant(false);
+                    self.status_message = format!(
+                        "Loaded template '{}'. Edit values or press Enter to execute.",
+                        tpl.title
+                    );
+                }
+            }
+            KeyCode::Char('r') => {
+                // Load and immediately execute the selected template
+                if let Some(tpl) = self.sql_templates.get(self.template_selected).cloned() {
+                    self.sql_input = tpl.sql;
+                    self.sql_cursor = self.sql_input.chars().count();
+                    self.show_template_modal = false;
+                    self.execute_current_sql();
+                    self.focus = FocusPane::ResultTable;
+                }
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize) - ('1' as usize);
+                if let Some(tpl) = self.sql_templates.get(idx).cloned() {
+                    self.sql_input = tpl.sql;
+                    self.sql_cursor = self.sql_input.chars().count();
+                    self.show_template_modal = false;
+                    self.focus = FocusPane::SqlInput;
+                    self.refresh_sql_assistant(false);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_sql_input_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
@@ -338,22 +621,32 @@ impl TuiApp {
                 }
             }
             KeyCode::Esc => {
-                self.focus = FocusPane::ResultTable;
+                if self.show_suggestions {
+                    self.show_suggestions = false;
+                } else {
+                    self.focus = FocusPane::ResultTable;
+                }
             }
             KeyCode::Left => {
                 self.sql_cursor = self.sql_cursor.saturating_sub(1);
+                self.refresh_sql_assistant(self.show_suggestions);
             }
             KeyCode::Right => {
                 let len = self.sql_input.chars().count();
                 if self.sql_cursor < len {
                     self.sql_cursor += 1;
+                    self.refresh_sql_assistant(self.show_suggestions);
+                } else if self.show_suggestions {
+                    self.accept_selected_suggestion();
                 }
             }
             KeyCode::Home => {
                 self.sql_cursor = 0;
+                self.refresh_sql_assistant(false);
             }
             KeyCode::End => {
                 self.sql_cursor = self.sql_input.chars().count();
+                self.refresh_sql_assistant(self.show_suggestions);
             }
             KeyCode::Backspace => {
                 if self.sql_cursor > 0 {
@@ -361,6 +654,7 @@ impl TuiApp {
                     chars.remove(self.sql_cursor - 1);
                     self.sql_input = chars.into_iter().collect();
                     self.sql_cursor -= 1;
+                    self.refresh_sql_assistant(true);
                 }
             }
             KeyCode::Delete => {
@@ -368,10 +662,15 @@ impl TuiApp {
                 if self.sql_cursor < chars.len() {
                     chars.remove(self.sql_cursor);
                     self.sql_input = chars.into_iter().collect();
+                    self.refresh_sql_assistant(true);
                 }
             }
             KeyCode::Up => {
-                if !self.query_history.is_empty() {
+                let force_history = key.modifiers.contains(KeyModifiers::CONTROL);
+                if self.show_suggestions && !self.sql_suggestions.is_empty() && !force_history {
+                    let count = self.sql_suggestions.len();
+                    self.suggestion_selected = (self.suggestion_selected + count - 1) % count;
+                } else if !self.query_history.is_empty() {
                     let next_idx = match self.history_index {
                         None => self.query_history.len() - 1,
                         Some(i) => i.saturating_sub(1),
@@ -379,10 +678,15 @@ impl TuiApp {
                     self.history_index = Some(next_idx);
                     self.sql_input = self.query_history[next_idx].clone();
                     self.sql_cursor = self.sql_input.chars().count();
+                    self.refresh_sql_assistant(false);
                 }
             }
             KeyCode::Down => {
-                if let Some(i) = self.history_index {
+                let force_history = key.modifiers.contains(KeyModifiers::CONTROL);
+                if self.show_suggestions && !self.sql_suggestions.is_empty() && !force_history {
+                    let count = self.sql_suggestions.len();
+                    self.suggestion_selected = (self.suggestion_selected + 1) % count;
+                } else if let Some(i) = self.history_index {
                     if i + 1 < self.query_history.len() {
                         self.history_index = Some(i + 1);
                         self.sql_input = self.query_history[i + 1].clone();
@@ -390,11 +694,19 @@ impl TuiApp {
                     } else {
                         self.history_index = None;
                     }
+                    self.refresh_sql_assistant(false);
+                } else {
+                    // Pressing Down when popup is closed opens autocomplete suggestions
+                    self.refresh_sql_assistant(true);
                 }
+            }
+            KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.refresh_sql_assistant(true);
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.sql_input.clear();
                 self.sql_cursor = 0;
+                self.refresh_sql_assistant(true);
             }
             KeyCode::Char(c) => {
                 let mut chars: Vec<char> = self.sql_input.chars().collect();
@@ -402,6 +714,7 @@ impl TuiApp {
                 chars.insert(pos, c);
                 self.sql_input = chars.into_iter().collect();
                 self.sql_cursor = pos + 1;
+                self.refresh_sql_assistant(true);
             }
             _ => {}
         }
@@ -445,6 +758,13 @@ impl TuiApp {
             }
             KeyCode::Char('/') | KeyCode::Char('e') => {
                 self.focus = FocusPane::SqlInput;
+                self.refresh_sql_assistant(true);
+            }
+            KeyCode::Char('w') => {
+                self.open_quick_filter_for_selected_cell();
+            }
+            KeyCode::Char('t') => {
+                self.open_template_picker();
             }
             KeyCode::Char('f') => {
                 self.focus = FocusPane::FilterInput;
@@ -517,6 +837,10 @@ impl TuiApp {
             }
             KeyCode::Char('/') | KeyCode::Char('e') => {
                 self.focus = FocusPane::SqlInput;
+                self.refresh_sql_assistant(true);
+            }
+            KeyCode::Char('t') => {
+                self.open_template_picker();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if count > 0 && self.schema_selected + 1 < count {
@@ -525,6 +849,51 @@ impl TuiApp {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.schema_selected = self.schema_selected.saturating_sub(1);
+            }
+            KeyCode::Char('w') => {
+                // Quick WHERE filter on the selected schema field
+                if let Some((_, snippet)) = self.schema_entries.get(self.schema_selected) {
+                    if !snippet.starts_with("SELECT ") {
+                        let field_name = snippet.clone();
+                        let first_table = self.engine.tables().first().copied();
+                        let table_name = first_table
+                            .map(|t| t.name.clone())
+                            .unwrap_or_else(|| "data".to_string());
+                        let sample_lit = first_table
+                            .and_then(|t| {
+                                collect_field_sample_values(t, &field_name, 1)
+                                    .first()
+                                    .map(format_sql_literal)
+                            })
+                            .unwrap_or_else(|| "'value'".to_string());
+                        let cond = format!("{} = {}", field_name, sample_lit);
+                        self.sql_input =
+                            merge_where_condition(&self.sql_input, &table_name, &cond, true);
+                        self.sql_cursor = self.sql_input.chars().count();
+                        self.focus = FocusPane::SqlInput;
+                        self.refresh_sql_assistant(true);
+                    }
+                }
+            }
+            KeyCode::Char('g') => {
+                // Quick GROUP BY & Count on the selected schema field
+                if let Some((_, snippet)) = self.schema_entries.get(self.schema_selected) {
+                    if !snippet.starts_with("SELECT ") {
+                        let field_name = snippet.clone();
+                        let table_name = self
+                            .engine
+                            .tables()
+                            .first()
+                            .map(|t| t.name.clone())
+                            .unwrap_or_else(|| "data".to_string());
+                        self.sql_input = format!(
+                            "SELECT {}, COUNT(*) AS count FROM {} GROUP BY {} ORDER BY count DESC LIMIT 50",
+                            field_name, table_name, field_name
+                        );
+                        self.sql_cursor = self.sql_input.chars().count();
+                        self.execute_current_sql();
+                    }
+                }
             }
             KeyCode::Enter => {
                 // Insert selected table name or field path into SQL query or run `SELECT * FROM table`
@@ -540,6 +909,7 @@ impl TuiApp {
                         self.sql_input.push_str(snippet);
                         self.sql_cursor = self.sql_input.chars().count();
                         self.focus = FocusPane::SqlInput;
+                        self.refresh_sql_assistant(true);
                     }
                 }
             }
@@ -650,6 +1020,17 @@ pub fn draw_tui(frame: &mut Frame, app: &mut TuiApp) {
 
     draw_status_bar(frame, app, root_chunks[1]);
 
+    // Floating autocomplete dropdown right below the SQL bar when focused
+    if app.focus == FocusPane::SqlInput && app.show_suggestions && !app.sql_suggestions.is_empty() {
+        draw_sql_autocomplete_popup(frame, app, right_chunks[0]);
+    }
+
+    if app.show_quick_filter_modal {
+        draw_quick_filter_modal(frame, app);
+    }
+    if app.show_template_modal {
+        draw_template_modal(frame, app);
+    }
     if app.show_detail_modal {
         draw_detail_modal(frame, app);
     }
@@ -677,7 +1058,7 @@ fn draw_schema_sidebar(frame: &mut Frame, app: &TuiApp, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(border_style)
-                .title(" Tables, Detected Shapes & Schema "),
+                .title(" Schema (Enter:Add  w:Where  g:Group) "),
         )
         .highlight_style(
             Style::default()
@@ -696,26 +1077,48 @@ fn draw_top_bars(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(72), // SQL Input
-            Constraint::Percentage(28), // Quick Filter Input
+            Constraint::Percentage(74), // SQL Input
+            Constraint::Percentage(26), // Quick Filter Input
         ])
         .split(area);
 
-    // 1. SQL Input box
+    // 1. SQL Input box with live validation badge, syntax highlighting, and ghost text
     let sql_focused = app.focus == FocusPane::SqlInput;
+    let validation_color = app.sql_validation.color();
     let sql_border = if sql_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(validation_color)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let hist_badge = match app.history_index {
-        Some(idx) => format!(
-            " SQL Query [History {}/{}] (Enter=Run, Up/Down=History) ",
-            idx + 1,
-            app.query_history.len()
-        ),
-        None => " SQL Query (Enter=Run, '/'=Focus, Up/Down=History) ".to_string(),
+    let validation_badge = app.sql_validation.badge_text();
+    let title_line = match app.history_index {
+        Some(idx) => Line::from(vec![
+            Span::styled(
+                format!(
+                    " SQL [History {}/{}] ",
+                    idx + 1,
+                    app.query_history.len()
+                ),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("│ {} ", validation_badge),
+                Style::default().fg(validation_color),
+            ),
+        ]),
+        None => Line::from(vec![
+            Span::styled(
+                " SQL (Enter:Run  Tab:Complete  Ctrl+T:Templates) ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("│ {} ", validation_badge),
+                Style::default().fg(validation_color),
+            ),
+        ]),
     };
 
     let sql_inner_w = top_chunks[0].width.saturating_sub(2) as usize;
@@ -725,13 +1128,21 @@ fn draw_top_bars(frame: &mut Frame, app: &TuiApp, area: Rect) {
         0
     };
 
-    let sql_para = Paragraph::new(app.sql_input.as_str())
+    let active_ghost = if sql_focused && app.show_suggestions {
+        app.sql_suggestions.get(app.suggestion_selected)
+    } else {
+        None
+    };
+    let highlighted_sql =
+        highlight_sql_line(&app.sql_input, app.sql_cursor, active_ghost, &app.engine);
+
+    let sql_para = Paragraph::new(highlighted_sql)
         .scroll((0, sql_scroll_x))
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(sql_border)
-                .title(hist_badge),
+                .title(title_line),
         );
     frame.render_widget(sql_para, top_chunks[0]);
 
@@ -764,7 +1175,7 @@ fn draw_top_bars(frame: &mut Frame, app: &TuiApp, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(filter_border)
-                .title(" Row Filter ('f') "),
+                .title(" Quick Row Search ('f') "),
         );
     frame.render_widget(filter_para, top_chunks[1]);
 
@@ -774,6 +1185,71 @@ fn draw_top_bars(frame: &mut Frame, app: &TuiApp, area: Rect) {
         let cy = top_chunks[1].y + 1;
         frame.set_cursor_position((cx, cy));
     }
+}
+
+fn draw_sql_autocomplete_popup(frame: &mut Frame, app: &TuiApp, top_bar_area: Rect) {
+    let max_items = app.sql_suggestions.len().min(8);
+    if max_items == 0 {
+        return;
+    }
+
+    let popup_height = (max_items as u16) + 2;
+    let popup_width = top_bar_area.width.clamp(40, 78);
+    let popup_x = top_bar_area.x;
+    let popup_y = (top_bar_area.y + top_bar_area.height).min(frame.area().height.saturating_sub(popup_height));
+    let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    let items: Vec<ListItem> = app
+        .sql_suggestions
+        .iter()
+        .take(max_items)
+        .map(|sug| {
+            let cat_color = match sug.category {
+                "field" => Color::LightCyan,
+                "table" => Color::LightGreen,
+                "operator" | "value" => Color::Yellow,
+                "function" => Color::LightMagenta,
+                "clause" | "template" => Color::LightBlue,
+                _ => Color::Gray,
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    format!(" [{:^8}] ", sug.category),
+                    Style::default().fg(cat_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<24} ", sug.label),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    sug.description.clone(),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    frame.render_widget(Clear, popup_area);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .title(" 💡 SQL Suggestions (Tab:Accept  Up/Down:Select  Esc:Dismiss  Ctrl+T:Templates) "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(40, 65, 95))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸");
+
+    let mut state = ListState::default();
+    state.select(Some(app.suggestion_selected.min(max_items - 1)));
+    frame.render_stateful_widget(list, popup_area, &mut state);
 }
 
 fn draw_error_banner(frame: &mut Frame, app: &TuiApp, area: Rect) {
@@ -786,7 +1262,7 @@ fn draw_error_banner(frame: &mut Frame, app: &TuiApp, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Red))
-            .title(" Error "),
+            .title(" SQL Error & Suggestion "),
     );
     frame.render_widget(err_para, area);
 }
@@ -902,7 +1378,7 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     };
 
     let title = format!(
-        " Results (Row {}/{} [visible {}-{}], col {}/{}){} — Arrows/hjkl:Navigate  s:SortCol  f:Filter  Enter:Inspect ",
+        " Results (Row {}/{} [visible {}-{}], col {}/{}){} — w:QuickFilter  t:Templates  s:Sort  f:Search  Enter:Inspect ",
         if total_vis_rows == 0 { 0 } else { app.selected_row + 1 },
         total_vis_rows,
         if total_vis_rows == 0 { 0 } else { start_row + 1 },
@@ -1042,12 +1518,190 @@ fn draw_status_bar(frame: &mut Frame, app: &TuiApp, area: Rect) {
         Span::styled(&app.status_message, Style::default().fg(Color::Gray)),
         Span::raw("  |  "),
         Span::styled(
-            "Tab:Pane  /:SQL  f:Filter  s:Sort  c:Reset  Enter:JSON  ?:Help  q:Quit",
+            "/:SQL  w:QuickFilter  t:Templates  f:Search  s:Sort  c:Reset  Enter:JSON  ?:Help  q:Quit",
             Style::default().fg(Color::Yellow),
         ),
     ]);
 
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn draw_quick_filter_modal(frame: &mut Frame, app: &TuiApp) {
+    if app.quick_filter_actions.is_empty() {
+        return;
+    }
+
+    let area = centered_rect(76, 68, frame.area());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(6),    // Action list
+            Constraint::Length(4), // Preview of generated SQL
+        ])
+        .split(area);
+
+    let items: Vec<ListItem> = app
+        .quick_filter_actions
+        .iter()
+        .enumerate()
+        .map(|(idx, act)| {
+            let num_badge = if idx < 9 {
+                format!(" [{}] ", idx + 1)
+            } else {
+                "     ".to_string()
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    num_badge,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<44} ", act.title),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(act.description.clone(), Style::default().fg(Color::Gray)),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .title(" ⚡ Quick SQL Filter & Actions for Selected Cell (Enter/1-9:Run  e:Edit in SQL Bar  Esc:Cancel) "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(40, 65, 95))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = ListState::default();
+    state.select(Some(app.quick_filter_selected));
+    frame.render_stateful_widget(list, chunks[0], &mut state);
+
+    let preview_sql = app
+        .quick_filter_actions
+        .get(app.quick_filter_selected)
+        .map(|a| a.sql.as_str())
+        .unwrap_or("");
+    let preview_line = highlight_sql_line(preview_sql, preview_sql.len(), None, &app.engine);
+    let preview_para = Paragraph::new(preview_line)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Generated SQL Preview (Press Enter to execute, or 'e' to customize in SQL bar) "),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(preview_para, chunks[1]);
+}
+
+fn draw_template_modal(frame: &mut Frame, app: &TuiApp) {
+    if app.sql_templates.is_empty() {
+        return;
+    }
+
+    let area = centered_rect(82, 76, frame.area());
+    frame.render_widget(Clear, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(8),    // Recipe list
+            Constraint::Length(5), // SQL + Explanation preview
+        ])
+        .split(area);
+
+    let items: Vec<ListItem> = app
+        .sql_templates
+        .iter()
+        .enumerate()
+        .map(|(idx, tpl)| {
+            let num_badge = if idx < 9 {
+                format!(" [{}] ", idx + 1)
+            } else {
+                "     ".to_string()
+            };
+            let line = Line::from(vec![
+                Span::styled(
+                    num_badge,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("[{:^11}] ", tpl.category),
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    tpl.title.clone(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .title(" 📖 SQL Recipe & Cheat-Sheet Picker (Enter/1-9:Load into SQL Editor  r:Run Immediately  Esc:Close) "),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(55, 45, 85))
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = ListState::default();
+    state.select(Some(app.template_selected));
+    frame.render_stateful_widget(list, chunks[0], &mut state);
+
+    if let Some(selected_tpl) = app.sql_templates.get(app.template_selected) {
+        let sql_line = highlight_sql_line(
+            &selected_tpl.sql,
+            selected_tpl.sql.len(),
+            None,
+            &app.engine,
+        );
+        let exp_line = Line::from(vec![
+            Span::styled(" 💡 ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                selected_tpl.explanation.clone(),
+                Style::default().fg(Color::Gray),
+            ),
+        ]);
+        let preview_para = Paragraph::new(vec![sql_line, Line::from(""), exp_line])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(" Template SQL & Syntax Guide "),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(preview_para, chunks[1]);
+    }
 }
 
 fn draw_detail_modal(frame: &mut Frame, app: &TuiApp) {
@@ -1097,26 +1751,32 @@ fn draw_detail_modal(frame: &mut Frame, app: &TuiApp) {
 
 fn draw_help_modal(frame: &mut Frame) {
     let help_text = "\
-Keyboard Shortcuts:
-────────────────────────────────────────────────────────────
-  Tab / Shift+Tab   Cycle focus: Result Table → SQL → Filter → Schema
-  / or e            Focus SQL Query Input bar
+Keyboard Shortcuts & Guided SQL Assistant:
+──────────────────────────────────────────────────────────────────────
+  / or e            Focus SQL Query bar (with live syntax check & autocomplete)
+  Tab (in SQL)      Accept highlighted autocomplete suggestion (or switch pane)
+  Up / Down (SQL)   Cycle autocomplete suggestions (or Ctrl+Up/Down for history)
+  Ctrl+Space (SQL)  Open autocomplete suggestions at cursor
   Enter (in SQL)    Execute SQL query
-  Up / Down (SQL)   Navigate SQL query history
-  Ctrl+U (in SQL)   Clear input line
+  Ctrl+U (in SQL)   Clear SQL input line
+
+  w (in Table)      ⚡ Quick SQL Filter menu for the currently selected cell!
+                    (Filter = value, != value, ILIKE, >=, <=, GROUP BY column)
+  t or Ctrl+T       📖 Open SQL Recipe & Template Picker (pre-filled with schema)
+  w / g (in Schema) Add WHERE filter ('w') or run GROUP BY count ('g') on field
+  Enter (in Schema) Run SELECT * on table or insert field path into SQL
 
   Arrows / hjkl     Navigate rows and columns in Result Table
   PageUp / PageDown Scroll 15 rows up or down
   Home/g / End/G    Jump to first / last row
   s                 Sort Result Table by selected column (Asc → Desc → Off)
-  f                 Focus live Row Filter input
-  c                 Clear active row filter and column sort
+  f                 Focus Quick Row Search input (live text search)
+  c                 Clear active row search and column sort
   Enter or d        Open JSON Detail Inspector for current row & cell
-  Enter (in Schema) Run SELECT * on table or append field path to SQL
   ? or F1           Toggle this Help modal
   q or Ctrl+C       Quit Rustrix";
 
-    let area = centered_rect(68, 68, frame.area());
+    let area = centered_rect(74, 76, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1339,5 +1999,56 @@ mod tests {
             "GROUP BY over 50k rows took too long: {:?}",
             group_elapsed
         );
+    }
+
+    #[test]
+    fn test_tui_autocomplete_quick_filter_and_templates() {
+        let tmp = TempDir::new().unwrap();
+        let mut engine = QueryEngine::new();
+        let (name, path) = parse_file_spec("examples/users.json");
+        let table = load_json_file(&name, &path, Some(tmp.path()), false).unwrap();
+        engine.register_table(table);
+
+        let mut app = TuiApp::new(engine);
+        let backend = TestBackend::new(120, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. Test Quick-Filter modal ('w') on row 0, col 1 ('name' = 'Alice Vance')
+        app.selected_row = 0;
+        app.selected_col = 1;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert!(app.show_quick_filter_modal);
+        assert!(!app.quick_filter_actions.is_empty());
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+
+        // Press Enter to apply the first quick filter ("name = 'Alice Vance'")
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.show_quick_filter_modal);
+        assert_eq!(app.visible_row_indices.len(), 1);
+        assert!(app.sql_input.contains("WHERE name = 'Alice Vance'"));
+
+        // 2. Test SQL Template Picker modal ('t')
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(app.show_template_modal);
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+
+        // Press 'r' to run the first template immediately
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(!app.show_template_modal);
+        assert!(app.error_message.is_none());
+
+        // 3. Test live SQL autocomplete & Tab completion in SQL input bar
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert_eq!(app.focus, FocusPane::SqlInput);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for ch in "SELECT * FROM users WH".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert!(app.show_suggestions);
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+
+        // Press Tab to accept "WHERE " completion
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.sql_input, "SELECT * FROM users WHERE ");
     }
 }

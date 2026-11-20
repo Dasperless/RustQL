@@ -72,23 +72,28 @@ Each file's stem becomes its SQL table name:
 
 *(Note: When only a single file is loaded, you can also query it as `FROM data` in addition to its filename stem. You can also assign custom table aliases on the command line via `alias=path/to/file.json`.)*
 
-#### TUI Keyboard Shortcuts
+#### TUI Keyboard Shortcuts & Guided SQL Assistant
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `Shift+Tab` | Cycle focus across panes: **Result Table** → **SQL Input** → **Row Filter** → **Schema Browser** |
-| `/` or `e` | Focus the **SQL Query Input** bar |
+| `/` or `e` | Focus the **SQL Query Input** bar (activates live syntax validation & autocomplete) |
+| `Tab` (in SQL Input) | Accept the highlighted **autocomplete suggestion** (or switch panes when popup is closed) |
+| `Up` / `Down` (in SQL Input) | Navigate **autocomplete suggestions** (use `Ctrl+Up` / `Ctrl+Down` or close popup with `Esc` for query history) |
+| `Ctrl+Space` (in SQL Input) | Open context-aware SQL autocomplete dropdown at cursor |
 | `Enter` (in SQL Input) | Execute the current SQL query |
-| `Up` / `Down` (in SQL Input) | Browse executed SQL query history |
 | `Ctrl+U` | Clear the active input line |
+| `w` (in Result Table) | ⚡ Open **Quick SQL Filter & Action menu** for the selected cell (`= value`, `!= value`, `ILIKE`, `>=`, `<=`, `IS NOT NULL`, `GROUP BY` count) |
+| `t` or `Ctrl+T` | 📖 Open **SQL Recipe & Template Picker** pre-filled with your loaded table and column names |
+| `w` / `g` (in Schema Browser) | Smartly append a `WHERE field = ...` filter (`w`) or execute a `GROUP BY field` count query (`g`) |
+| `Enter` (in Schema Browser) | Execute `SELECT * FROM <table>` (on table header) or append field path to SQL query |
+| `Tab` / `Shift+Tab` | Cycle focus across panes: **Result Table** → **SQL Input** → **Row Search** → **Schema Browser** |
 | `Up`/`Down`/`Left`/`Right` or `h`/`j`/`k`/`l` | Navigate rows and columns in the **Result Table** |
 | `PageUp` / `PageDown` | Scroll 15 rows up or down |
 | `Home` (`g`) / `End` (`G`) | Jump to first / last row |
 | `s` (in Result Table) | Sort table by currently selected column (`ASC ▲` → `DESC ▼` → `Unsorted`) |
-| `f` (in Result Table) | Focus the live **Row Filter** input |
+| `f` (in Result Table) | Focus the live **Quick Row Search** input |
 | `c` (in Result Table) | Clear active row filter and interactive column sort |
 | `Enter` or `d` (in Result Table) | Open the **Row & Cell JSON Detail Inspector** modal |
-| `Enter` (in Schema Browser) | Execute `SELECT * FROM <table>` (on table header) or append field path to SQL query |
 | `?` or `F1` | Open keyboard shortcuts Help modal |
 | `q` or `Ctrl+C` | Quit Rustrix |
 
