@@ -6,6 +6,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/Dasperless/Rustrix/releases/download/v0.1.0/rustrix-v0.1.0-x86_64-pc-windows-msvc.zip",
+            "hash": "abce4f9da95988ffb0fe018ed58defb7d877ef6dd91180e06e7ffd582a2c05e2",
             "extract_dir": "rustrix-v0.1.0-x86_64-pc-windows-msvc"
         }
     },

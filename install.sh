@@ -46,7 +46,8 @@ case "$OS" in
     Linux)
         case "$ARCH" in
             x86_64)
-                TARGET="x86_64-unknown-linux-gnu"
+                TARGET="x86_64-unknown-linux-musl"
+                FALLBACK_TARGET="x86_64-unknown-linux-gnu"
                 ;;
             *)
                 error "Unsupported Linux architecture: $ARCH (currently x86_64 is prebuilt; build from source using 'cargo build --release')"
@@ -115,7 +116,16 @@ SHA_URL="${DOWNLOAD_URL}.sha256"
 
 info "Downloading ${ARCHIVE_NAME}..."
 if ! curl -fsSL "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ARCHIVE_NAME}"; then
-    error "Failed to download release archive from: ${DOWNLOAD_URL}"
+    if [ -n "${FALLBACK_TARGET:-}" ]; then
+        info "Trying target variant: ${FALLBACK_TARGET}..."
+        TARGET="$FALLBACK_TARGET"
+        ARCHIVE_NAME="rustrix-${VERSION}-${TARGET}.tar.gz"
+        DOWNLOAD_URL="${GITHUB_URL}/releases/download/${VERSION}/${ARCHIVE_NAME}"
+        SHA_URL="${DOWNLOAD_URL}.sha256"
+        curl -fsSL "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ARCHIVE_NAME}" || error "Failed to download release archive from: ${DOWNLOAD_URL}"
+    else
+        error "Failed to download release archive from: ${DOWNLOAD_URL}"
+    fi
 fi
 
 # 5. Checksum Verification (if sha256 tool available)
