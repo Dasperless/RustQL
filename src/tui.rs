@@ -122,6 +122,8 @@ pub struct TuiApp {
     pub status_message: String,
     /// Whether the Row/Cell JSON Detail Inspector modal is open
     pub show_detail_modal: bool,
+    /// Vertical scroll offset (in visual lines) inside the Row/Cell JSON Detail Inspector modal
+    pub detail_scroll_offset: usize,
     /// Whether the Help overlay modal is open
     pub show_help_modal: bool,
     /// Whether the user requested to quit
@@ -177,6 +179,7 @@ impl TuiApp {
             error_message: None,
             status_message: "Ready. Press '/' to edit SQL (with live autocomplete), 'w' on any cell to filter, 't' for SQL templates, '?' for help.".to_string(),
             show_detail_modal: false,
+            detail_scroll_offset: 0,
             show_help_modal: false,
             should_quit: false,
         };
@@ -303,6 +306,7 @@ impl TuiApp {
                 self.row_scroll_offset = 0;
                 self.selected_col = 0;
                 self.col_scroll_offset = 0;
+                self.detail_scroll_offset = 0;
                 self.recompute_visible_rows();
                 if let SqlValidationStatus::Warning { ref message } = self.sql_validation {
                     self.status_message = format!(
@@ -436,12 +440,7 @@ impl TuiApp {
         }
 
         if self.show_detail_modal {
-            if matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('d')
-            ) {
-                self.show_detail_modal = false;
-            }
+            self.handle_detail_modal_key(key);
             return;
         }
 
@@ -506,6 +505,59 @@ impl TuiApp {
             FocusPane::FilterInput => self.handle_filter_input_key(key),
             FocusPane::ResultTable => self.handle_result_table_key(key),
             FocusPane::SchemaBrowser => self.handle_schema_browser_key(key),
+        }
+    }
+
+    fn handle_detail_modal_key(&mut self, key: KeyEvent) {
+        let col_count = self
+            .current_result
+            .as_ref()
+            .map(|r| r.columns.len())
+            .unwrap_or(0);
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('d') => {
+                self.show_detail_modal = false;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                self.detail_scroll_offset = self.detail_scroll_offset.saturating_add(15);
+            }
+            KeyCode::PageUp => {
+                self.detail_scroll_offset = self.detail_scroll_offset.saturating_sub(15);
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.detail_scroll_offset = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                let lines = build_detail_modal_lines(self);
+                let approx_max = count_wrapped_lines(&lines, 40);
+                self.detail_scroll_offset = approx_max;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if col_count > 0 && self.selected_col + 1 < col_count {
+                    self.selected_col += 1;
+                    if self.selected_col >= self.col_scroll_offset + 6 {
+                        self.col_scroll_offset = self.selected_col.saturating_sub(5);
+                    }
+                    self.detail_scroll_offset = 0;
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                if self.selected_col > 0 {
+                    self.selected_col -= 1;
+                    if self.selected_col < self.col_scroll_offset {
+                        self.col_scroll_offset = self.selected_col;
+                    }
+                    self.detail_scroll_offset = 0;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -781,6 +833,7 @@ impl TuiApp {
             }
             KeyCode::Enter | KeyCode::Char('d') => {
                 if row_count > 0 {
+                    self.detail_scroll_offset = 0;
                     self.show_detail_modal = true;
                 }
             }
@@ -1337,22 +1390,20 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     let end_row = (start_row + visible_capacity).min(total_vis_rows);
     let window_row_indices = &app.visible_row_indices[start_row..end_row];
 
-    let rows = window_row_indices.iter().map(|&r_idx| {
-        let row_data = &res.rows[r_idx];
-        let cells = (start_col..total_cols).map(|c_idx| {
-            let val = row_data.get(c_idx).unwrap_or(&Value::Null);
-            let text = value_to_table_cell_string(val);
-            let style = if val.is_null() {
-                Style::default().fg(Color::DarkGray)
-            } else if c_idx == app.selected_col {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            Cell::from(text).style(style)
+    let rows = window_row_indices
+        .iter()
+        .enumerate()
+        .map(|(win_idx, &r_idx)| {
+            let is_selected_row = start_row + win_idx == app.selected_row;
+            let row_data = &res.rows[r_idx];
+            let cells = (start_col..total_cols).map(|c_idx| {
+                let val = row_data.get(c_idx).unwrap_or(&Value::Null);
+                let is_selected_col = c_idx == app.selected_col;
+                let is_active_cell = is_selected_row && is_selected_col;
+                format_table_cell(val, is_selected_col, is_active_cell)
+            });
+            Row::new(cells).height(1)
         });
-        Row::new(cells).height(1)
-    });
 
     // Compute dynamic column widths over visible window rows only (instantaneous)
     let num_vis_cols = visible_cols_slice.len().max(1);
@@ -1704,14 +1755,200 @@ fn draw_template_modal(frame: &mut Frame, app: &TuiApp) {
     }
 }
 
-fn draw_detail_modal(frame: &mut Frame, app: &TuiApp) {
+fn format_table_cell(val: &Value, is_selected_col: bool, is_active_cell: bool) -> Cell<'static> {
+    let extra_mod = if is_selected_col {
+        Modifier::BOLD | Modifier::UNDERLINED
+    } else {
+        Modifier::empty()
+    };
+    let text = value_to_table_cell_string(val);
+    let line = match val {
+        Value::Null => Line::from(Span::styled(
+            text,
+            Style::default().fg(Color::DarkGray).add_modifier(extra_mod),
+        )),
+        Value::Bool(_) => Line::from(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD | extra_mod),
+        )),
+        Value::Number(_) => Line::from(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(extra_mod),
+        )),
+        Value::String(_) => Line::from(Span::styled(
+            text,
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(extra_mod),
+        )),
+        Value::Array(_) | Value::Object(_) => {
+            Line::from(highlight_json_line_spans(&text, extra_mod))
+        }
+    };
+    let cell = Cell::from(line);
+    if is_active_cell {
+        cell.style(Style::default().bg(Color::Rgb(55, 78, 115)))
+    } else {
+        cell
+    }
+}
+
+/// Syntax-highlight a single line of JSON (pretty-printed or compact inline) using the Rustrix theme:
+/// - Object keys: `Cyan` (bold)
+/// - String values: `LightGreen`
+/// - Numeric values: `LightCyan`
+/// - Booleans (`true`/`false`): `LightMagenta` (bold)
+/// - `null` / `NULL`: `DarkGray`
+/// - Braces, brackets, colons, commas: `Gray`
+pub fn highlight_json_line_spans(line: &str, extra_modifier: Modifier) -> Vec<Span<'static>> {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut i = 0;
+
+    while i < n {
+        let c = chars[i];
+
+        // 1. Whitespace
+        if c.is_whitespace() {
+            let start = i;
+            while i < n && chars[i].is_whitespace() {
+                i += 1;
+            }
+            let ws: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(
+                ws,
+                Style::default().add_modifier(extra_modifier),
+            ));
+            continue;
+        }
+
+        // 2. Quoted JSON string (either object key or string value)
+        if c == '"' {
+            let start = i;
+            i += 1;
+            let mut escaped = false;
+            while i < n {
+                let ch = chars[i];
+                i += 1;
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    break;
+                }
+            }
+            let mut lookahead = i;
+            while lookahead < n && chars[lookahead].is_whitespace() {
+                lookahead += 1;
+            }
+            let is_key = lookahead < n && chars[lookahead] == ':';
+            let token: String = chars[start..i].iter().collect();
+            let style = if is_key {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD | extra_modifier)
+            } else {
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(extra_modifier)
+            };
+            spans.push(Span::styled(token, style));
+            continue;
+        }
+
+        // 3. Numeric literal
+        if c.is_ascii_digit() || (c == '-' && i + 1 < n && chars[i + 1].is_ascii_digit()) {
+            let start = i;
+            i += 1;
+            while i < n
+                && (chars[i].is_ascii_digit()
+                    || matches!(chars[i], '.' | 'e' | 'E' | '+' | '-'))
+            {
+                i += 1;
+            }
+            let num_str: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(
+                num_str,
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(extra_modifier),
+            ));
+            continue;
+        }
+
+        // 4. Keywords / literals (true, false, null, NULL)
+        if c.is_alphabetic() {
+            let start = i;
+            while i < n && chars[i].is_alphanumeric() {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let style = match word.as_str() {
+                "true" | "false" => Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD | extra_modifier),
+                "null" | "NULL" => Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(extra_modifier),
+                _ => Style::default()
+                    .fg(Color::White)
+                    .add_modifier(extra_modifier),
+            };
+            spans.push(Span::styled(word, style));
+            continue;
+        }
+
+        // 5. Braces, brackets, colons, commas, ellipsis
+        let start = i;
+        i += 1;
+        let punct: String = chars[start..i].iter().collect();
+        spans.push(Span::styled(
+            punct,
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(extra_modifier),
+        ));
+    }
+
+    spans
+}
+
+fn push_highlighted_json_value(out: &mut Vec<Line<'static>>, val: &Value) {
+    let pretty = serde_json::to_string_pretty(val).unwrap_or_default();
+    for line in pretty.lines() {
+        out.push(Line::from(highlight_json_line_spans(line, Modifier::empty())));
+    }
+}
+
+/// Try to parse an embedded JSON object or array from a string cell value.
+fn try_parse_embedded_json(s: &str) -> Option<Value> {
+    let trimmed = s.trim();
+    let looks_like_json_container = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+    if !looks_like_json_container {
+        return None;
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(parsed @ (Value::Object(_) | Value::Array(_))) => Some(parsed),
+        _ => None,
+    }
+}
+
+/// Build the syntax-highlighted lines for the Row & Cell JSON Detail Inspector modal.
+pub fn build_detail_modal_lines(app: &TuiApp) -> Vec<Line<'static>> {
     let res = match &app.current_result {
         Some(r) => r,
-        None => return,
+        None => return Vec::new(),
     };
     let &actual_row_idx = match app.visible_row_indices.get(app.selected_row) {
         Some(i) => i,
-        None => return,
+        None => return Vec::new(),
     };
     let row = &res.rows[actual_row_idx];
     let mut row_obj = Map::new();
@@ -1726,26 +1963,125 @@ fn draw_detail_modal(frame: &mut Frame, app: &TuiApp) {
         .unwrap_or_default();
     let selected_val = row.get(app.selected_col).cloned().unwrap_or(Value::Null);
 
-    let pretty_cell = serde_json::to_string_pretty(&selected_val).unwrap_or_default();
-    let pretty_row = serde_json::to_string_pretty(&Value::Object(row_obj)).unwrap_or_default();
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
-    let content = format!(
-        "Selected Cell [{}]:\n{}\n\nFull Row JSON (Row #{}):\n{}",
-        selected_col_name,
-        pretty_cell,
-        actual_row_idx + 1,
-        pretty_row
-    );
+    match &selected_val {
+        Value::String(s) => {
+            if let Some(embedded_json) = try_parse_embedded_json(s) {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("Selected Cell [{}]", selected_col_name),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " (JSON string):",
+                        Style::default()
+                            .fg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                push_highlighted_json_value(&mut lines, &embedded_json);
+            } else if s.contains('\n') {
+                lines.push(Line::from(Span::styled(
+                    format!("Selected Cell [{}]:", selected_col_name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for raw_line in s.lines() {
+                    lines.push(Line::from(Span::styled(
+                        raw_line.to_string(),
+                        Style::default().fg(Color::LightGreen),
+                    )));
+                }
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("Selected Cell [{}]:", selected_col_name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                push_highlighted_json_value(&mut lines, &selected_val);
+            }
+        }
+        _ => {
+            lines.push(Line::from(Span::styled(
+                format!("Selected Cell [{}]:", selected_col_name),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            push_highlighted_json_value(&mut lines, &selected_val);
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("Full Row JSON (Row #{}):", actual_row_idx + 1),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    push_highlighted_json_value(&mut lines, &Value::Object(row_obj));
+
+    lines
+}
+
+/// Compute the total number of visual lines after soft-wrapping `lines` to `wrap_width` columns.
+fn count_wrapped_lines(lines: &[Line<'_>], wrap_width: u16) -> usize {
+    let width = (wrap_width as usize).max(1);
+    lines
+        .iter()
+        .map(|line| {
+            let char_len: usize = line
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count())
+                .sum();
+            if char_len == 0 {
+                1
+            } else {
+                char_len.div_ceil(width)
+            }
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+fn draw_detail_modal(frame: &mut Frame, app: &mut TuiApp) {
+    let lines = build_detail_modal_lines(app);
+    if lines.is_empty() {
+        return;
+    }
 
     let area = centered_rect(70, 75, frame.area());
     frame.render_widget(Clear, area);
+
+    let inner_width = area.width.saturating_sub(2).max(1);
+    let inner_height = (area.height.saturating_sub(2) as usize).max(1);
+    let total_visual_lines = count_wrapped_lines(&lines, inner_width);
+    let max_scroll = total_visual_lines.saturating_sub(inner_height);
+
+    app.detail_scroll_offset = app.detail_scroll_offset.min(max_scroll);
+    let scroll_y = app.detail_scroll_offset.min(u16::MAX as usize) as u16;
+
+    let current_top = (app.detail_scroll_offset + 1).min(total_visual_lines);
+    let current_bottom = (app.detail_scroll_offset + inner_height).min(total_visual_lines);
+    let title = format!(
+        " Row & Cell JSON Inspector [Lines {}-{}/{}] (j/k/PgUp/PgDn/g/G:Scroll  h/l:Col  Esc/Enter:Close) ",
+        current_top, current_bottom, total_visual_lines
+    );
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-        .title(" Row & Cell JSON Inspector (Press Esc or Enter to close) ");
-    let para = Paragraph::new(content)
+        .title(title);
+    let para = Paragraph::new(lines)
         .block(block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y, 0));
     frame.render_widget(para, area);
 }
 
@@ -1773,6 +2109,7 @@ Keyboard Shortcuts & Guided SQL Assistant:
   f                 Focus Quick Row Search input (live text search)
   c                 Clear active row search and column sort
   Enter or d        Open JSON Detail Inspector for current row & cell
+                    (In Inspector: j/k/PgUp/PgDn/g/G:Scroll  h/l:Switch Column)
   ? or F1           Toggle this Help modal
   q or Ctrl+C       Quit Rustrix";
 
@@ -2050,5 +2387,128 @@ mod tests {
         // Press Tab to accept "WHERE " completion
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.sql_input, "SELECT * FROM users WHERE ");
+    }
+
+    #[test]
+    fn test_detail_modal_scroll_and_json_color_coding() {
+        let mut engine = QueryEngine::new();
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".to_string(), serde_json::Value::from(1));
+        // Large nested JSON array in cell
+        let large_items: Vec<serde_json::Value> = (0..60)
+            .map(|i| {
+                serde_json::json!({
+                    "index": i,
+                    "label": format!("item_description_{}", i),
+                    "active": i % 2 == 0,
+                    "extra": null
+                })
+            })
+            .collect();
+        obj.insert(
+            "payload".to_string(),
+            serde_json::Value::Array(large_items),
+        );
+        // Embedded JSON string cell
+        obj.insert(
+            "embedded".to_string(),
+            serde_json::Value::from("{\"nested_key\": \"nested_val\", \"count\": 42, \"ok\": true}"),
+        );
+        // Very long single-line string cell that requires soft-wrap height calculation
+        obj.insert(
+            "long_text".to_string(),
+            serde_json::Value::from("A".repeat(2500)),
+        );
+
+        let table = crate::loader::LoadedTable {
+            name: "records".to_string(),
+            source_path: std::path::PathBuf::from("/tmp/records.json"),
+            shape: crate::loader::JsonShape::Ndjson,
+            schema_fields: Vec::new(),
+            rows: std::sync::Arc::new(vec![obj]),
+            columns: vec![
+                "id".to_string(),
+                "payload".to_string(),
+                "embedded".to_string(),
+                "long_text".to_string(),
+            ],
+            loaded_from_cache: false,
+        };
+        engine.register_table(table);
+
+        let mut app = TuiApp::new(engine);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Select column 1 ('payload') and open Detail Inspector
+        app.selected_col = 1;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.show_detail_modal);
+        assert_eq!(app.detail_scroll_offset, 0);
+
+        // Scroll down with 'j', Down, and PageDown
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll_offset, 1);
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll_offset, 2);
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll_offset, 17);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll_offset, 16);
+
+        // Jump to bottom ('G') and verify draw_tui clamps scroll offset to max_scroll
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert!(app.detail_scroll_offset > 100);
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+        let clamped_bottom = app.detail_scroll_offset;
+        assert!(clamped_bottom > 50);
+
+        // Jump back to top ('g')
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll_offset, 0);
+
+        // Switch column inside modal with Right ('l') to 'embedded' (col 2)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.detail_scroll_offset, 1);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(app.selected_col, 2);
+        assert_eq!(app.detail_scroll_offset, 0);
+
+        // Verify embedded JSON string is detected and pretty-printed
+        let embedded_lines = build_detail_modal_lines(&app);
+        let header_text: String = embedded_lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(header_text.contains("Selected Cell [embedded] (JSON string):"));
+
+        // Switch column to 'long_text' (col 3) and verify soft-wrapped single-line string can scroll
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.selected_col, 3);
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+        assert!(
+            app.detail_scroll_offset > 0,
+            "Long single-line string should allow vertical scrolling via wrapped line count"
+        );
+
+        // Verify JSON syntax highlighting colors on tokens
+        let sample_spans = highlight_json_line_spans(
+            "  \"active\": true, \"count\": 42, \"name\": \"Alice\", \"extra\": null",
+            Modifier::empty(),
+        );
+        let find_color = |token: &str| -> Option<Color> {
+            sample_spans
+                .iter()
+                .find(|s| s.content.as_ref() == token)
+                .and_then(|s| s.style.fg)
+        };
+        assert_eq!(find_color("\"active\""), Some(Color::Cyan));
+        assert_eq!(find_color("true"), Some(Color::LightMagenta));
+        assert_eq!(find_color("42"), Some(Color::LightCyan));
+        assert_eq!(find_color("\"Alice\""), Some(Color::LightGreen));
+        assert_eq!(find_color("null"), Some(Color::DarkGray));
+        assert_eq!(find_color(":"), Some(Color::Gray));
     }
 }
