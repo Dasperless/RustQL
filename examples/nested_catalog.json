@@ -1,0 +1,82 @@
+{
+  "api_version": "2.1.0",
+  "generated_by": "inventory-service",
+  "region": "us-west-2",
+  "records": [
+    {
+      "sku": "KB-01",
+      "category": "Peripherals",
+      "warehouse": {
+        "code": "SEA-1",
+        "city": "Seattle",
+        "aisle": 4
+      },
+      "stock": 42,
+      "specs": {
+        "wireless": false,
+        "weight_grams": 980
+      },
+      "suppliers": ["KeyCraft", "SwitchWorks"]
+    },
+    {
+      "sku": "MN-4K",
+      "category": "Displays",
+      "warehouse": {
+        "code": "AUS-2",
+        "city": "Austin",
+        "aisle": 12
+      },
+      "stock": 15,
+      "specs": {
+        "wireless": false,
+        "weight_grams": 5400
+      },
+      "suppliers": ["OptiPanel"]
+    },
+    {
+      "sku": "MS-PRO",
+      "category": "Peripherals",
+      "warehouse": {
+        "code": "SEA-1",
+        "city": "Seattle",
+        "aisle": 2
+      },
+      "stock": 78,
+      "specs": {
+        "wireless": true,
+        "weight_grams": 145
+      },
+      "suppliers": ["ErgoMotion", "KeyCraft"]
+    },
+    {
+      "sku": "HD-NC",
+      "category": "Audio",
+      "warehouse": {
+        "code": "SFO-1",
+        "city": "San Francisco",
+        "aisle": 7
+      },
+      "stock": 31,
+      "specs": {
+        "wireless": true,
+        "weight_grams": 260
+      },
+      "suppliers": ["AcoustiCore"]
+    },
+    {
+      "sku": "DK-ST",
+      "category": "Furniture",
+      "warehouse": {
+        "code": "AUS-2",
+        "city": "Austin",
+        "aisle": 19
+      },
+      "stock": 9,
+      "specs": {
+        "wireless": false,
+        "weight_grams": 28500
+      },
+      "suppliers": ["SteelFrame Co"]
+    }
+  ]
+}
