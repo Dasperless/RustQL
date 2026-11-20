@@ -1,6 +1,6 @@
-# Contributing to Rustrix
+# Contributing to RustQL
 
-Thank you for your interest in contributing to **Rustrix**!
+Thank you for your interest in contributing to **RustQL**!
 
 ## Development Prerequisites
 
@@ -12,8 +12,8 @@ Thank you for your interest in contributing to **Rustrix**!
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/Dasperless/Rustrix.git
-cd Rustrix
+git clone https://github.com/Dasperless/RustQL.git
+cd RustQL
 
 # 2. Run the full test suite (unit, integration, and doc-tests)
 cargo test
@@ -34,7 +34,7 @@ To run the Valgrind memory leak audit locally on Linux:
 
 ```bash
 valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=1 \
-  ./target/release/rustrix -q "SELECT u.name, o.order_id, item.sku FROM users u JOIN orders o ON u.id = o.user_id, UNNEST(o.items) AS item ORDER BY o.order_id" \
+  ./target/release/rustql -q "SELECT u.name, o.order_id, item.sku FROM users u JOIN orders o ON u.id = o.user_id, UNNEST(o.items) AS item ORDER BY o.order_id" \
   examples/users.json examples/orders.ndjson
 ```
 

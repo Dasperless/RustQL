@@ -1,8 +1,8 @@
-//! Integration tests for Rustrix SQL features, shape detection, caching, and read-only safety.
+//! Integration tests for RustQL SQL features, shape detection, caching, and read-only safety.
 
-use rustrix::cli::{format_query_result, OutputFormat};
-use rustrix::engine::QueryEngine;
-use rustrix::loader::{detect_shape_from_str, load_json_file, parse_file_spec, JsonShape};
+use rustql::cli::{format_query_result, OutputFormat};
+use rustql::engine::QueryEngine;
+use rustql::loader::{detect_shape_from_str, load_json_file, parse_file_spec, JsonShape};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -317,14 +317,14 @@ fn test_nested_dot_paths_and_array_unnesting() {
     assert_eq!(
         res_inline_unnest.rows[0],
         vec![
-            json!("Rustrix Labs"),
+            json!("RustQL Labs"),
             json!("us-east-1"),
             json!("streaming")
         ]
     );
     assert_eq!(
         res_inline_unnest.rows[3],
-        vec![json!("Rustrix Labs"), json!("us-east-1"), json!("unnest")]
+        vec![json!("RustQL Labs"), json!("us-east-1"), json!("unnest")]
     );
 }
 
@@ -509,7 +509,7 @@ fn test_security_arithmetic_overflow_and_division_by_zero() {
 
 #[test]
 fn test_security_terminal_ansi_escape_sanitization() {
-    use rustrix::cli::sanitize_terminal_text;
+    use rustql::cli::sanitize_terminal_text;
 
     let malicious = "hello\x1b[31mRED\x1b]52;c;dGVzdA==\x07\nworld";
     let safe = sanitize_terminal_text(malicious);

@@ -1,6 +1,6 @@
-//! # Rustrix
+//! # RustQL
 //!
-//! **Rustrix** is a pure-Rust terminal UI (TUI) and command-line interface (CLI)
+//! **RustQL** is a pure-Rust terminal UI (TUI) and command-line interface (CLI)
 //! for running SQL queries directly against JSON and NDJSON files.
 //!
 //! ## Core Guarantees
@@ -11,8 +11,8 @@
 //!
 //! ## Quick Start (Library Usage)
 //! ```no_run
-//! use rustrix::engine::QueryEngine;
-//! use rustrix::loader::{load_json_file, parse_file_spec};
+//! use rustql::engine::QueryEngine;
+//! use rustql::loader::{load_json_file, parse_file_spec};
 //!
 //! let mut engine = QueryEngine::new();
 //! let (table_name, path) = parse_file_spec("examples/users.json");

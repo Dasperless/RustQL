@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Rustrix Linux & macOS Installer
-# https://github.com/Dasperless/Rustrix
+# RustQL Linux & macOS Installer
+# https://github.com/Dasperless/RustQL
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Dasperless/RustQL/main/install.sh | bash
 #
 # Optional environment variables:
 #   VERSION="v0.1.0"      # Specify exact release version tag (defaults to latest)
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-REPO="Dasperless/Rustrix"
+REPO="Dasperless/RustQL"
 GITHUB_URL="https://github.com/${REPO}"
 
 BOLD='\033[1m'
@@ -90,7 +90,7 @@ case "$VERSION" in
     *) VERSION="v${VERSION}" ;;
 esac
 
-info "Installing Rustrix ${VERSION} (${TARGET})..."
+info "Installing RustQL ${VERSION} (${TARGET})..."
 
 # 3. Determine Installation Directory
 if [ -z "${BIN_DIR:-}" ]; then
@@ -110,7 +110,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ARCHIVE_NAME="rustrix-${VERSION}-${TARGET}.tar.gz"
+ARCHIVE_NAME="rustql-${VERSION}-${TARGET}.tar.gz"
 DOWNLOAD_URL="${GITHUB_URL}/releases/download/${VERSION}/${ARCHIVE_NAME}"
 SHA_URL="${DOWNLOAD_URL}.sha256"
 
@@ -119,7 +119,7 @@ if ! curl -fsSL "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ARCHIVE_NAME}"; then
     if [ -n "${FALLBACK_TARGET:-}" ]; then
         info "Trying target variant: ${FALLBACK_TARGET}..."
         TARGET="$FALLBACK_TARGET"
-        ARCHIVE_NAME="rustrix-${VERSION}-${TARGET}.tar.gz"
+        ARCHIVE_NAME="rustql-${VERSION}-${TARGET}.tar.gz"
         DOWNLOAD_URL="${GITHUB_URL}/releases/download/${VERSION}/${ARCHIVE_NAME}"
         SHA_URL="${DOWNLOAD_URL}.sha256"
         curl -fsSL "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ARCHIVE_NAME}" || error "Failed to download release archive from: ${DOWNLOAD_URL}"
@@ -144,17 +144,17 @@ fi
 info "Extracting binary..."
 tar -xzf "${TEMP_DIR}/${ARCHIVE_NAME}" -C "$TEMP_DIR"
 
-SRC_BIN="${TEMP_DIR}/rustrix-${VERSION}-${TARGET}/rustrix"
+SRC_BIN="${TEMP_DIR}/rustql-${VERSION}-${TARGET}/rustql"
 if [ ! -f "$SRC_BIN" ]; then
     # In case archive root is flat
-    SRC_BIN="${TEMP_DIR}/rustrix"
+    SRC_BIN="${TEMP_DIR}/rustql"
 fi
 
 if [ ! -f "$SRC_BIN" ]; then
-    error "Compiled binary 'rustrix' not found in release archive."
+    error "Compiled binary 'rustql' not found in release archive."
 fi
 
-DEST_BIN="${BIN_DIR}/rustrix"
+DEST_BIN="${BIN_DIR}/rustql"
 cp "$SRC_BIN" "$DEST_BIN"
 chmod +x "$DEST_BIN"
 
@@ -165,7 +165,7 @@ if [ "$OS" = "Darwin" ]; then
     fi
 fi
 
-success "Rustrix successfully installed to: ${DEST_BIN}"
+success "RustQL successfully installed to: ${DEST_BIN}"
 
 # 8. Check PATH
 case ":${PATH}:" in
@@ -173,7 +173,7 @@ case ":${PATH}:" in
         ;;
     *)
         warn "'${BIN_DIR}' is not in your PATH."
-        printf "To use rustrix from any terminal, add this to your ~/.bashrc or ~/.zshrc:\n"
+        printf "To use rustql from any terminal, add this to your ~/.bashrc or ~/.zshrc:\n"
         printf "    ${BOLD}export PATH=\"%s:\$PATH\"${NC}\n\n" "$BIN_DIR"
         ;;
 esac
@@ -184,6 +184,6 @@ if command -v "$DEST_BIN" >/dev/null 2>&1; then
 fi
 
 printf "\n${BOLD}Quick Start:${NC}\n"
-printf "  Interactive TUI:   ${GREEN}rustrix examples/users.json examples/orders.ndjson${NC}\n"
-printf "  Non-interactive:   ${GREEN}rustrix -q \"SELECT * FROM users\" examples/users.json${NC}\n"
-printf "  Documentation:     ${BLUE}https://github.com/Dasperless/Rustrix#readme${NC}\n"
+printf "  Interactive TUI:   ${GREEN}rustql examples/users.json examples/orders.ndjson${NC}\n"
+printf "  Non-interactive:   ${GREEN}rustql -q \"SELECT * FROM users\" examples/users.json${NC}\n"
+printf "  Documentation:     ${BLUE}https://github.com/Dasperless/RustQL#readme${NC}\n"

@@ -1,12 +1,12 @@
-//! Main entry point for the `rustrix` binary.
+//! Main entry point for the `rustql` binary.
 
 #![forbid(unsafe_code)]
 
 use clap::Parser;
-use rustrix::cli::{format_query_result, CliArgs};
-use rustrix::engine::QueryEngine;
-use rustrix::loader::{load_json_file, parse_file_spec};
-use rustrix::tui::run_tui;
+use rustql::cli::{format_query_result, CliArgs};
+use rustql::engine::QueryEngine;
+use rustql::loader::{load_json_file, parse_file_spec};
+use rustql::tui::run_tui;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -36,7 +36,7 @@ fn main() -> ExitCode {
             }
             Err(err) => {
                 let friendly =
-                    rustrix::sql_helper::diagnose_sql_error(sql, &err.to_string(), &engine);
+                    rustql::sql_helper::diagnose_sql_error(sql, &err.to_string(), &engine);
                 eprintln!("Query error: {}", friendly);
                 ExitCode::FAILURE
             }

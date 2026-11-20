@@ -2,10 +2,10 @@
 
 ## Security Model & Guarantees
 
-Rustrix is designed from the ground up for safe, deterministic local data inspection:
+RustQL is designed from the ground up for safe, deterministic local data inspection:
 
 1. **100% Safe Rust (`#![forbid(unsafe_code)]`) & Zero C/C++ Dependencies**:
-   - The `rustrix` library and binary are compiled with `#![forbid(unsafe_code)]`.
+   - The `rustql` library and binary are compiled with `#![forbid(unsafe_code)]`.
    - The entire dependency tree (`clap`, `crossterm`, `ratatui`, `serde`, `serde_json`, `sqlparser`, `thiserror`) is pure Rust with zero `-sys` native C/C++ bindings, eliminating buffer overflows, use-after-free, double-free, and C FFI memory corruption vulnerabilities.
 2. **Strictly Read-Only Source Files & SQL Dialect**:
    - Input JSON and NDJSON files are opened strictly in read-only mode (`std::fs::File::open`) and are never modified in place.
@@ -31,18 +31,18 @@ Rustrix is designed from the ground up for safe, deterministic local data inspec
 
 ## Verifying Release Binaries
 
-Official release archives published on [GitHub Releases](https://github.com/Dasperless/Rustrix/releases) include:
+Official release archives published on [GitHub Releases](https://github.com/Dasperless/RustQL/releases) include:
 - `SHA256SUMS` checksums for every target archive.
 - Cryptographic GitHub Artifact Build Provenance Attestations verifiable via the GitHub CLI:
   ```bash
-  gh attestation verify rustrix-v0.1.0-<target>.tar.gz --repo Dasperless/Rustrix
+  gh attestation verify rustql-v0.1.0-<target>.tar.gz --repo Dasperless/RustQL
   ```
 - Embedded Windows Application Manifest (`asInvoker`, Windows 10/11 compatibility, UTF-8 codepage) and `VS_VERSION_INFO` resource metadata on Windows (`x86_64-pc-windows-msvc`).
 - Ad-hoc Mach-O code signatures (`codesign --verify`) on macOS (`aarch64-apple-darwin` and `x86_64-apple-darwin`).
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in Rustrix, please report it responsibly:
-- Open a private security advisory via [GitHub Security Advisories](https://github.com/Dasperless/Rustrix/security/advisories/new).
-- Include a minimal reproduction query or sample JSON payload along with your OS and `rustrix --version` output.
+If you discover a security vulnerability in RustQL, please report it responsibly:
+- Open a private security advisory via [GitHub Security Advisories](https://github.com/Dasperless/RustQL/security/advisories/new).
+- Include a minimal reproduction query or sample JSON payload along with your OS and `rustql --version` output.
 - You will receive an initial response within 48 hours.

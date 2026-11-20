@@ -1,5 +1,5 @@
 {
-  "organization": "Rustrix Labs",
+  "organization": "RustQL Labs",
   "environment": "production",
   "cluster": {
     "primary_region": "us-east-1",

@@ -1,4 +1,4 @@
-//! CLI argument parsing and non-interactive output formatting for Rustrix.
+//! CLI argument parsing and non-interactive output formatting for RustQL.
 
 use clap::{Parser, ValueEnum};
 use serde_json::Value;
@@ -19,10 +19,10 @@ pub enum OutputFormat {
     Csv,
 }
 
-/// Rustrix: A pure-Rust TUI and CLI for running SQL queries against JSON files.
+/// RustQL: A pure-Rust TUI and CLI for running SQL queries against JSON files.
 #[derive(Parser, Debug, Clone)]
 #[command(
-    name = "rustrix",
+    name = "rustql",
     version,
     about = "Run SQL queries against JSON files (Top-level Arrays, NDJSON, Nested Objects)"
 )]

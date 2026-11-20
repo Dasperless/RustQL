@@ -51,8 +51,8 @@ jobs:
 
       - name: Verify CLI version and non-interactive query execution
         run: |
-          ./target/release/rustrix --version
-          ./target/release/rustrix -q "SELECT id, name, department FROM users WHERE active = true ORDER BY salary DESC" examples/users.json
+          ./target/release/rustql --version
+          ./target/release/rustql -q "SELECT id, name, department FROM users WHERE active = true ORDER BY salary DESC" examples/users.json
 
   memory-leak-check:
     name: Valgrind Memory Leak & Safety Audit
@@ -73,9 +73,9 @@ jobs:
       - name: Run Valgrind full leak check across SQL queries, JOINs, UNNEST, and caching
         run: |
           valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=1 \
-            ./target/release/rustrix -q "SELECT u.name, o.order_id, item.sku, c.warehouse.city FROM users u JOIN orders o ON u.id = o.user_id, UNNEST(o.items) AS item JOIN nested_catalog c ON item.sku = c.sku ORDER BY o.order_id" \
+            ./target/release/rustql -q "SELECT u.name, o.order_id, item.sku, c.warehouse.city FROM users u JOIN orders o ON u.id = o.user_id, UNNEST(o.items) AS item JOIN nested_catalog c ON item.sku = c.sku ORDER BY o.order_id" \
             examples/users.json examples/orders.ndjson examples/nested_catalog.json
 
           valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=1 \
-            ./target/release/rustrix --no-cache --format json -q "SELECT department, COUNT(*) AS cnt, SUM(salary) AS total, AVG(salary) AS avg_sal FROM users GROUP BY department ORDER BY cnt DESC" \
+            ./target/release/rustql --no-cache --format json -q "SELECT department, COUNT(*) AS cnt, SUM(salary) AS total, AVG(salary) AS avg_sal FROM users GROUP BY department ORDER BY cnt DESC" \
             examples/users.json

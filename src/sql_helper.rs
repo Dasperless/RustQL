@@ -1,4 +1,4 @@
-//! Intelligent SQL assistant for Rustrix:
+//! Intelligent SQL assistant for RustQL:
 //! - Live SQL syntax & schema validation with "Did you mean...?" fuzzy suggestions
 //! - Context-aware SQL autocomplete (keywords, tables, nested JSON dot-paths, operators, sample values)
 //! - SQL syntax highlighting with inline ghost-text completion preview
@@ -20,7 +20,7 @@ use crate::cli::value_to_display_string;
 use crate::engine::QueryEngine;
 use crate::loader::LoadedTable;
 
-/// Major SQL keywords supported by Rustrix.
+/// Major SQL keywords supported by RustQL.
 pub const SQL_KEYWORDS: &[&str] = &[
     "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "ILIKE", "BETWEEN", "IS", "NULL",
     "GROUP", "BY", "HAVING", "ORDER", "ASC", "DESC", "LIMIT", "OFFSET", "JOIN", "INNER", "LEFT",
@@ -28,7 +28,7 @@ pub const SQL_KEYWORDS: &[&str] = &[
     "ELSE", "END", "CAST", "TRUE", "FALSE",
 ];
 
-/// Built-in aggregate and scalar functions supported by Rustrix.
+/// Built-in aggregate and scalar functions supported by RustQL.
 pub const SQL_FUNCTIONS: &[&str] = &[
     "COUNT",
     "SUM",

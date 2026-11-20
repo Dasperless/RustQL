@@ -58,7 +58,7 @@ pub enum SortDir {
     Desc,
 }
 
-/// Complete state of the Rustrix TUI application.
+/// Complete state of the RustQL TUI application.
 pub struct TuiApp {
     pub engine: QueryEngine,
     pub focus: FocusPane,
@@ -1949,7 +1949,7 @@ fn format_table_cell(val: &Value, is_selected_col: bool, is_active_cell: bool) -
     }
 }
 
-/// Syntax-highlight a single line of JSON (pretty-printed or compact inline) using the Rustrix theme:
+/// Syntax-highlight a single line of JSON (pretty-printed or compact inline) using the RustQL theme:
 /// - Fold indicators (`▾` / `▸`): `Yellow` (bold)
 /// - Object keys: `Cyan` (bold)
 /// - String values: `LightGreen`
@@ -2720,7 +2720,7 @@ Keyboard Shortcuts & Guided SQL Assistant:
   Enter or d        Open JSON Detail Inspector for current row & cell
                     (In Inspector: j/k:Move  Space/Enter:Fold  a:FoldAll  h/l:Col)
   ? or F1           Toggle this Help modal
-  q or Ctrl+C       Quit Rustrix";
+  q or Ctrl+C       Quit RustQL";
 
     let area = centered_rect(74, 76, frame.area());
     frame.render_widget(Clear, area);
@@ -2731,7 +2731,7 @@ Keyboard Shortcuts & Guided SQL Assistant:
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
-        .title(" Rustrix Help (Press Esc, Enter, or ? to close) ");
+        .title(" RustQL Help (Press Esc, Enter, or ? to close) ");
     let para = Paragraph::new(help_text).block(block);
     frame.render_widget(para, area);
 }

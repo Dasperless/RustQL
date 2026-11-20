@@ -1,5 +1,5 @@
 [package]
-name = "rustrix"
+name = "rustql"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
@@ -7,14 +7,14 @@ authors = ["Darío Vargas <https://github.com/Dasperless>"]
 description = "A pure-Rust terminal UI (TUI) and CLI for running SQL queries against JSON and NDJSON files"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/Dasperless/Rustrix"
-documentation = "https://docs.rs/rustrix"
+repository = "https://github.com/Dasperless/RustQL"
+documentation = "https://docs.rs/rustql"
 keywords = ["sql", "json", "ndjson", "tui", "cli"]
 categories = ["command-line-utilities", "database"]
 exclude = [".github/"]
 
 [[bin]]
-name = "rustrix"
+name = "rustql"
 path = "src/main.rs"
 
 [dependencies]
