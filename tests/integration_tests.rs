@@ -316,11 +316,7 @@ fn test_nested_dot_paths_and_array_unnesting() {
     assert_eq!(res_inline_unnest.rows.len(), 4);
     assert_eq!(
         res_inline_unnest.rows[0],
-        vec![
-            json!("RustQL Labs"),
-            json!("us-east-1"),
-            json!("streaming")
-        ]
+        vec![json!("RustQL Labs"), json!("us-east-1"), json!("streaming")]
     );
     assert_eq!(
         res_inline_unnest.rows[3],
