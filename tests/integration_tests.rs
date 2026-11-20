@@ -399,5 +399,15 @@ fn test_edge_cases_distinct_order_by_empty_result_and_having() {
         .execute("SELECT COUNT(*) AS cnt FROM data WHERE active = true")
         .unwrap();
     assert_eq!(res_data.rows[0], vec![json!(4)]);
+
+    // 5. Double-quoted string literals vs single-quoted string literals
+    let res_double = engine
+        .execute("SELECT id, name FROM users WHERE name = \"Alice Vance\"")
+        .unwrap();
+    let res_single = engine
+        .execute("SELECT id, name FROM users WHERE name = 'Alice Vance'")
+        .unwrap();
+    assert_eq!(res_double.rows, vec![vec![json!(1), json!("Alice Vance")]]);
+    assert_eq!(res_single.rows, res_double.rows);
 }
 

@@ -105,6 +105,34 @@ impl EvalRow {
         }
     }
 
+    /// Check if a name or prefix matches any known table alias or column name in this row.
+    fn contains_column_or_alias(&self, name: &str) -> bool {
+        let lower = name.to_lowercase();
+        for (t_alias, cols) in &self.table_order {
+            if t_alias.to_lowercase() == lower {
+                return true;
+            }
+            if cols.iter().any(|c| c.to_lowercase() == lower) {
+                return true;
+            }
+        }
+        if name.contains('.') {
+            let parts: Vec<&str> = name.split('.').collect();
+            if let Some((first, _)) = parts.split_first() {
+                let first_lower = first.to_lowercase();
+                for (t_alias, cols) in &self.table_order {
+                    if t_alias.to_lowercase() == first_lower {
+                        return true;
+                    }
+                    if cols.iter().any(|c| c.to_lowercase() == first_lower) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Resolve a path of identifiers (`["u", "address", "city"]` or `["address", "city"]` or `["id"]`).
     fn resolve_path(&self, parts: &[String]) -> Value {
         if parts.is_empty() {
@@ -1300,7 +1328,15 @@ fn eval_aggregate_function(
 fn eval_scalar_expr(expr: &Expr, row: &EvalRow) -> Result<Value, EngineError> {
     match expr {
         Expr::Value(sql_val) => eval_sql_literal(sql_val),
-        Expr::Identifier(ident) => Ok(resolve_identifier_or_dot_path(&ident.value, row)),
+        Expr::Identifier(ident) => {
+            if ident.quote_style == Some('"') && !row.contains_column_or_alias(&ident.value) {
+                // If it is enclosed in double quotes and does not match any column or table alias,
+                // treat it as a string literal (common in SQLite/MySQL and JSON SQL queries).
+                Ok(Value::String(ident.value.clone()))
+            } else {
+                Ok(resolve_identifier_or_dot_path(&ident.value, row))
+            }
+        }
         Expr::CompoundIdentifier(idents) => {
             let parts: Vec<String> = idents.iter().map(|i| i.value.clone()).collect();
             Ok(row.resolve_path(&parts))
