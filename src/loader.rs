@@ -705,8 +705,8 @@ fn collect_schema_for_key(
         depth,
     });
 
-    // If it's a nested object, recursively collect subfields up to depth 4
-    if depth < 4 {
+    // If it's a nested object, recursively collect subfields up to depth 3
+    if depth < 3 {
         let mut sub_rows: Vec<Map<String, Value>> = Vec::new();
         for row in &rows[..sample_limit] {
             if let Some(Value::Object(sub_map)) = row.get(top_or_sub_key) {
@@ -720,6 +720,12 @@ fn collect_schema_for_key(
                     if !sub_keys.contains(k) {
                         sub_keys.push(k.clone());
                     }
+                    if sub_keys.len() >= 20 {
+                        break;
+                    }
+                }
+                if sub_keys.len() >= 20 {
+                    break;
                 }
             }
             for sk in sub_keys {

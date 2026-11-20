@@ -75,6 +75,8 @@ pub struct TuiApp {
 
     /// Selected row index in `visible_row_indices`
     pub selected_row: usize,
+    /// Vertical row scroll offset so huge datasets render instantly with virtual windowing
+    pub row_scroll_offset: usize,
     /// Selected column index in `current_result.columns`
     pub selected_col: usize,
     /// Horizontal column scroll offset so wide tables can be browsed smoothly
@@ -100,12 +102,17 @@ pub struct TuiApp {
 impl TuiApp {
     /// Initialize the TUI state from a pre-loaded [`QueryEngine`].
     pub fn new(engine: QueryEngine) -> Self {
-        let first_table_name = engine
-            .tables()
-            .first()
-            .map(|t| t.name.clone())
-            .unwrap_or_else(|| "data".to_string());
-        let initial_sql = format!("SELECT * FROM {}", first_table_name);
+        let tables = engine.tables();
+        let (first_table_name, table_row_count) = if let Some(first_table) = tables.first() {
+            (first_table.name.clone(), first_table.rows.len())
+        } else {
+            ("data".to_string(), 0)
+        };
+        let initial_sql = if table_row_count > 1000 {
+            format!("SELECT * FROM {} LIMIT 1000", first_table_name)
+        } else {
+            format!("SELECT * FROM {}", first_table_name)
+        };
         let sql_cursor = initial_sql.chars().count();
         let schema_entries = build_schema_entries(&engine);
 
@@ -121,6 +128,7 @@ impl TuiApp {
             visible_row_indices: Vec::new(),
             sort_state: None,
             selected_row: 0,
+            row_scroll_offset: 0,
             selected_col: 0,
             col_scroll_offset: 0,
             schema_selected: 0,
@@ -158,6 +166,7 @@ impl TuiApp {
                 self.error_message = None;
                 self.sort_state = None;
                 self.selected_row = 0;
+                self.row_scroll_offset = 0;
                 self.selected_col = 0;
                 self.col_scroll_offset = 0;
                 self.recompute_visible_rows();
@@ -226,6 +235,9 @@ impl TuiApp {
         self.visible_row_indices = indices;
         if self.selected_row >= self.visible_row_indices.len() {
             self.selected_row = self.visible_row_indices.len().saturating_sub(1);
+        }
+        if self.selected_row < self.row_scroll_offset {
+            self.row_scroll_offset = self.selected_row;
         }
     }
 
@@ -585,7 +597,7 @@ fn build_schema_entries(engine: &QueryEngine) -> Vec<(Line<'static>, String)> {
 }
 
 /// Render the TUI frame.
-pub fn draw_tui(frame: &mut Frame, app: &TuiApp) {
+pub fn draw_tui(frame: &mut Frame, app: &mut TuiApp) {
     let root_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -775,7 +787,7 @@ fn draw_error_banner(frame: &mut Frame, app: &TuiApp, area: Rect) {
     frame.render_widget(err_para, area);
 }
 
-fn draw_result_table(frame: &mut Frame, app: &TuiApp, area: Rect) {
+fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     let focused = app.focus == FocusPane::ResultTable;
     let border_style = if focused {
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -825,7 +837,27 @@ fn draw_result_table(frame: &mut Frame, app: &TuiApp, area: Rect) {
 
     let header = Row::new(header_cells).height(1).bottom_margin(1);
 
-    let rows = app.visible_row_indices.iter().map(|&r_idx| {
+    // Virtual window calculations: only construct widget rows for what fits on screen
+    let total_vis_rows = app.visible_row_indices.len();
+    let visible_capacity = (area.height.saturating_sub(4) as usize).max(1);
+
+    if total_vis_rows > 0 {
+        app.selected_row = app.selected_row.min(total_vis_rows - 1);
+    } else {
+        app.selected_row = 0;
+    }
+
+    if app.selected_row < app.row_scroll_offset {
+        app.row_scroll_offset = app.selected_row;
+    } else if app.selected_row >= app.row_scroll_offset + visible_capacity {
+        app.row_scroll_offset = app.selected_row.saturating_sub(visible_capacity - 1);
+    }
+
+    let start_row = app.row_scroll_offset.min(total_vis_rows);
+    let end_row = (start_row + visible_capacity).min(total_vis_rows);
+    let window_row_indices = &app.visible_row_indices[start_row..end_row];
+
+    let rows = window_row_indices.iter().map(|&r_idx| {
         let row_data = &res.rows[r_idx];
         let cells = (start_col..total_cols).map(|c_idx| {
             let val = row_data.get(c_idx).unwrap_or(&Value::Null);
@@ -842,13 +874,13 @@ fn draw_result_table(frame: &mut Frame, app: &TuiApp, area: Rect) {
         Row::new(cells).height(1)
     });
 
-    // Compute dynamic column widths
+    // Compute dynamic column widths over visible window rows only (instantaneous)
     let num_vis_cols = visible_cols_slice.len().max(1);
     let mut constraints = Vec::with_capacity(num_vis_cols);
     for (offset, col_name) in visible_cols_slice.iter().enumerate() {
         let actual_col = start_col + offset;
         let mut max_w = col_name.chars().count() + 3;
-        for &r_idx in app.visible_row_indices.iter().take(50) {
+        for &r_idx in window_row_indices {
             if let Some(val) = res.rows[r_idx].get(actual_col) {
                 let len = value_to_display_string(val).chars().count();
                 if len > max_w {
@@ -866,9 +898,11 @@ fn draw_result_table(frame: &mut Frame, app: &TuiApp, area: Rect) {
     };
 
     let title = format!(
-        " Results ({}/{} rows, col {}/{}){} — Arrows/hjkl:Navigate  s:SortCol  f:Filter  Enter:Inspect ",
-        app.visible_row_indices.len(),
-        res.rows.len(),
+        " Results (Row {}/{} [visible {}-{}], col {}/{}){} — Arrows/hjkl:Navigate  s:SortCol  f:Filter  Enter:Inspect ",
+        if total_vis_rows == 0 { 0 } else { app.selected_row + 1 },
+        total_vis_rows,
+        if total_vis_rows == 0 { 0 } else { start_row + 1 },
+        end_row,
         (app.selected_col + 1).min(total_cols),
         total_cols,
         filter_badge
@@ -890,8 +924,9 @@ fn draw_result_table(frame: &mut Frame, app: &TuiApp, area: Rect) {
         .highlight_symbol("▶ ");
 
     let mut table_state = TableState::default();
-    if !app.visible_row_indices.is_empty() {
-        table_state.select(Some(app.selected_row));
+    if !window_row_indices.is_empty() {
+        let relative_selected = app.selected_row.saturating_sub(start_row);
+        table_state.select(Some(relative_selected));
     }
     frame.render_stateful_widget(table, area, &mut table_state);
 }
@@ -1043,12 +1078,23 @@ fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut TuiApp,
 ) -> io::Result<()> {
+    let mut needs_redraw = true;
     loop {
-        terminal.draw(|f| draw_tui(f, app))?;
+        if needs_redraw {
+            terminal.draw(|f| draw_tui(f, app))?;
+            needs_redraw = false;
+        }
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key_event(key);
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    app.handle_key_event(key);
+                    needs_redraw = true;
+                }
+                Event::Resize(_, _) => {
+                    needs_redraw = true;
+                }
+                _ => {}
             }
         }
 
@@ -1080,7 +1126,7 @@ mod tests {
         // Render into a headless ratatui TestBackend to verify layout & drawing
         let backend = TestBackend::new(120, 35);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw_tui(f, &app)).unwrap();
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
 
         // Scroll down & right
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1107,6 +1153,55 @@ mod tests {
         assert_eq!(app.focus, FocusPane::ResultTable);
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.show_detail_modal);
-        terminal.draw(|f| draw_tui(f, &app)).unwrap();
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn test_tui_render_speed_large_dataset() {
+        use std::time::Instant;
+        let mut engine = QueryEngine::new();
+        let mut rows = Vec::with_capacity(20000);
+        for i in 0..20000 {
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".to_string(), serde_json::Value::from(i));
+            obj.insert("name".to_string(), serde_json::Value::from(format!("user_{}", i)));
+            obj.insert(
+                "city".to_string(),
+                serde_json::Value::from(if i % 2 == 0 { "Berlin" } else { "Tokyo" }),
+            );
+            rows.push(obj);
+        }
+        let table = crate::loader::LoadedTable {
+            name: "big_data".to_string(),
+            source_path: std::path::PathBuf::from("/tmp/big_data.ndjson"),
+            shape: crate::loader::JsonShape::Ndjson,
+            schema_fields: Vec::new(),
+            rows: std::sync::Arc::new(rows),
+            columns: vec!["id".to_string(), "name".to_string(), "city".to_string()],
+            loaded_from_cache: false,
+        };
+        engine.register_table(table);
+
+        let mut app = TuiApp::new(engine);
+        // Execute SELECT * without limit to test rendering 20,000 rows with virtual windowing
+        app.sql_input = "SELECT * FROM big_data".to_string();
+        app.execute_current_sql();
+        assert_eq!(app.visible_row_indices.len(), 20000);
+
+        let backend = TestBackend::new(120, 35);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let t0 = Instant::now();
+        for _ in 0..100 {
+            terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let elapsed = t0.elapsed();
+        // 100 frames should take well under 500ms with virtual windowing (<5ms/frame)
+        assert!(
+            elapsed.as_millis() < 500,
+            "100 frames took too long: {:?}",
+            elapsed
+        );
     }
 }
