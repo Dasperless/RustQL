@@ -366,10 +366,30 @@ const MAX_NDJSON_LINE_BYTES: usize = 128 * 1024 * 1024;
 /// Maximum number of cached dataset pairs (`.meta.json` + `.ndjson`) retained in the cache directory.
 const MAX_CACHE_ENTRIES: usize = 64;
 
+/// Trim leading and trailing ASCII whitespace from a byte slice.
+#[inline]
+fn trim_ascii_whitespace(mut slice: &[u8]) -> &[u8] {
+    while let Some((first, rest)) = slice.split_first() {
+        if first.is_ascii_whitespace() {
+            slice = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((last, rest)) = slice.split_last() {
+        if last.is_ascii_whitespace() {
+            slice = rest;
+        } else {
+            break;
+        }
+    }
+    slice
+}
+
 /// Read a single line from `reader` into `buf`, enforcing `max_bytes` per line.
 fn read_bounded_line<R: BufRead>(
     reader: &mut R,
-    buf: &mut String,
+    buf: &mut Vec<u8>,
     max_bytes: usize,
 ) -> std::io::Result<usize> {
     let mut total_read = 0usize;
@@ -391,9 +411,7 @@ fn read_bounded_line<R: BufRead>(
                 ),
             ));
         }
-        let chunk_str = std::str::from_utf8(&available[..consume_len])
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        buf.push_str(chunk_str);
+        buf.extend_from_slice(&available[..consume_len]);
         reader.consume(consume_len);
         total_read += consume_len;
         if found_newline {
@@ -408,7 +426,7 @@ fn stream_parse_ndjson<R: BufRead>(
     path_label: &str,
 ) -> Result<Vec<Map<String, Value>>, LoaderError> {
     let mut rows = Vec::new();
-    let mut line = String::with_capacity(4096);
+    let mut line = Vec::with_capacity(4096);
     let mut idx = 0usize;
     loop {
         line.clear();
@@ -422,11 +440,11 @@ fn stream_parse_ndjson<R: BufRead>(
             break;
         }
         idx += 1;
-        let trimmed = line.trim();
+        let trimmed = trim_ascii_whitespace(&line);
         if trimmed.is_empty() {
             continue;
         }
-        let val: Value = serde_json::from_str(trimmed).map_err(|e| LoaderError::JsonParse {
+        let val: Value = serde_json::from_slice(trimmed).map_err(|e| LoaderError::JsonParse {
             path: path_label.to_string(),
             message: format!("Line {}: {}", idx, e),
         })?;
@@ -543,7 +561,7 @@ pub fn load_json_file(
         b'{' => {
             // Check if the first line is a complete JSON object followed by another line starting with '{'
             let mut reader = BufReader::with_capacity(256 * 1024, file);
-            let mut first_line = String::new();
+            let mut first_line = Vec::new();
             loop {
                 first_line.clear();
                 let n = read_bounded_line(&mut reader, &mut first_line, MAX_NDJSON_LINE_BYTES)
@@ -551,13 +569,14 @@ pub fn load_json_file(
                         path: path_label.clone(),
                         source: e,
                     })?;
-                if n == 0 || !first_line.trim().is_empty() {
+                if n == 0 || !trim_ascii_whitespace(&first_line).is_empty() {
                     break;
                 }
             }
 
-            let first_line_val: Result<Value, _> = serde_json::from_str(first_line.trim());
-            let mut second_line = String::new();
+            let first_line_trimmed = trim_ascii_whitespace(&first_line);
+            let first_line_val: Result<Value, _> = serde_json::from_slice(first_line_trimmed);
+            let mut second_line = Vec::new();
             loop {
                 second_line.clear();
                 let n = read_bounded_line(&mut reader, &mut second_line, MAX_NDJSON_LINE_BYTES)
@@ -565,16 +584,17 @@ pub fn load_json_file(
                         path: path_label.clone(),
                         source: e,
                     })?;
-                if n == 0 || !second_line.trim().is_empty() {
+                if n == 0 || !trim_ascii_whitespace(&second_line).is_empty() {
                     break;
                 }
             }
 
             if let Ok(first_obj) = first_line_val {
-                if !second_line.trim().is_empty() {
+                let second_line_trimmed = trim_ascii_whitespace(&second_line);
+                if !second_line_trimmed.is_empty() {
                     // Validate second line is also valid JSON -> NDJSON stream!
                     let second_obj: Value =
-                        serde_json::from_str(second_line.trim()).map_err(|e| {
+                        serde_json::from_slice(second_line_trimmed).map_err(|e| {
                             LoaderError::JsonParse {
                                 path: path_label.clone(),
                                 message: format!("Line 2: {}", e),
@@ -1062,5 +1082,15 @@ mod tests {
         assert!(detect_shape_from_str("   ", "empty.json").is_err());
         assert!(detect_shape_from_str("42", "num.json").is_err());
         assert!(detect_shape_from_str("\"hello\"", "str.json").is_err());
+    }
+
+    #[test]
+    fn test_ndjson_multibyte_utf8_across_chunk_boundary() {
+        let data = "{\"id\": 1, \"text\": \"hello 🦀 world\"}\n{\"id\": 2, \"text\": \"second line\"}\n";
+        let reader = BufReader::with_capacity(16, data.as_bytes());
+        let rows = stream_parse_ndjson(reader, "test.ndjson")
+            .expect("should stream parse without UTF-8 boundary error");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["text"], "hello 🦀 world");
     }
 }
