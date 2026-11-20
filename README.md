@@ -92,7 +92,8 @@ Download the prebuilt archive for your platform directly from [GitHub Releases](
 | Platform | Architecture | Release Archive | Package Format |
 | --- | --- | --- | --- |
 | **Windows** | `x86_64` (MSVC) | `rustrix-v0.1.0-x86_64-pc-windows-msvc.zip` | `.zip` with `rustrix.exe` + `install.ps1` |
-| **Linux** | `x86_64` (glibc >= 2.31) | `rustrix-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` | `.tar.gz` with `rustrix` + `install.sh` |
+| **Linux (Static: Zero glibc dependency)** | `x86_64` (musl) | `rustrix-v0.1.0-x86_64-unknown-linux-musl.tar.gz` | `.tar.gz` with standalone static `rustrix` |
+| **Linux (Dynamic)** | `x86_64` (glibc >= 2.31) | `rustrix-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` | `.tar.gz` with `rustrix` + `install.sh` |
 | **macOS** (Apple Silicon) | `aarch64` (`M1`–`M4`) | `rustrix-v0.1.0-aarch64-apple-darwin.tar.gz` | `.tar.gz` with signed Mach-O binary |
 | **macOS** (Intel) | `x86_64` | `rustrix-v0.1.0-x86_64-apple-darwin.tar.gz` | `.tar.gz` with signed Mach-O binary |
 
