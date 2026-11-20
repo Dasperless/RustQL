@@ -20,7 +20,9 @@ use sqlparser::ast::{
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
+use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 
@@ -54,41 +56,151 @@ pub struct QueryResult {
 }
 
 /// Internal tuple of `(columns, projected_rows, context_rows)` returned by projection evaluation.
-type ProjectionOutput = (Vec<String>, Vec<Vec<Value>>, Vec<EvalRow>);
+type ProjectionOutput<'a> = (Vec<String>, Vec<Vec<Value>>, Vec<EvalRow<'a>>);
 
-/// An execution row binds table aliases to their row objects, plus a merged flat map for unqualified lookups.
-#[derive(Debug, Clone, Default)]
-struct EvalRow {
-    /// Map of `table_alias` -> row JSON map
-    tables: HashMap<String, Map<String, Value>>,
-    /// Ordered list of `(table_alias, column_names)` for deterministic `SELECT *` expansion
-    table_order: Vec<(String, Vec<String>)>,
+/// Zero-copy or reference-counted row object map.
+#[derive(Debug, Clone)]
+enum RowMap<'a> {
+    Borrowed(&'a Map<String, Value>),
+    Owned(Arc<Map<String, Value>>),
 }
 
-impl EvalRow {
-    fn from_single_table(alias: &str, cols: &[String], row: &Map<String, Value>) -> Self {
-        let mut tables = HashMap::new();
-        tables.insert(alias.to_string(), row.clone());
-        Self {
-            tables,
-            table_order: vec![(alias.to_string(), cols.to_vec())],
+impl<'a> Deref for RowMap<'a> {
+    type Target = Map<String, Value>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        match self {
+            RowMap::Borrowed(m) => m,
+            RowMap::Owned(m) => m,
+        }
+    }
+}
+
+/// Compact storage for table alias -> row map bindings without per-row HashMap overhead.
+#[derive(Debug, Clone, Default)]
+enum RowTables<'a> {
+    #[default]
+    Empty,
+    Single(Arc<str>, RowMap<'a>),
+    Multi(Vec<(Arc<str>, RowMap<'a>)>),
+}
+
+impl<'a> RowTables<'a> {
+    #[inline]
+    fn get(&self, alias: &str) -> Option<&RowMap<'a>> {
+        match self {
+            RowTables::Empty => None,
+            RowTables::Single(a, m) => {
+                if a.as_ref() == alias {
+                    Some(m)
+                } else {
+                    None
+                }
+            }
+            RowTables::Multi(list) => list
+                .iter()
+                .find(|(a, _)| a.as_ref() == alias)
+                .map(|(_, m)| m),
         }
     }
 
-    fn merge(&self, other: &EvalRow) -> Self {
-        let mut tables = self.tables.clone();
-        for (k, v) in &other.tables {
-            tables.insert(k.clone(), v.clone());
+    #[inline]
+    fn get_ignore_case(&self, alias_query: &str) -> Option<(&str, &RowMap<'a>)> {
+        match self {
+            RowTables::Empty => None,
+            RowTables::Single(a, m) => {
+                if a.eq_ignore_ascii_case(alias_query) {
+                    Some((a.as_ref(), m))
+                } else {
+                    None
+                }
+            }
+            RowTables::Multi(list) => list
+                .iter()
+                .find(|(a, _)| a.eq_ignore_ascii_case(alias_query))
+                .map(|(a, m)| (a.as_ref(), m)),
         }
-        let mut table_order = self.table_order.clone();
-        for item in &other.table_order {
+    }
+
+    fn insert(&mut self, alias: Arc<str>, map: RowMap<'a>) {
+        match std::mem::take(self) {
+            RowTables::Empty => {
+                *self = RowTables::Single(alias, map);
+            }
+            RowTables::Single(a, m) => {
+                if a == alias {
+                    *self = RowTables::Single(alias, map);
+                } else {
+                    *self = RowTables::Multi(vec![(a, m), (alias, map)]);
+                }
+            }
+            RowTables::Multi(mut list) => {
+                if let Some(pos) = list.iter().position(|(a, _)| *a == alias) {
+                    list[pos].1 = map;
+                } else {
+                    list.push((alias, map));
+                }
+                *self = RowTables::Multi(list);
+            }
+        }
+    }
+
+    fn extend_from(&mut self, other: &RowTables<'a>) {
+        match other {
+            RowTables::Empty => {}
+            RowTables::Single(a, m) => {
+                self.insert(Arc::clone(a), m.clone());
+            }
+            RowTables::Multi(list) => {
+                for (a, m) in list {
+                    self.insert(Arc::clone(a), m.clone());
+                }
+            }
+        }
+    }
+}
+
+/// An execution row binds table aliases to their row objects, plus shared table column ordering.
+#[derive(Debug, Clone, Default)]
+struct EvalRow<'a> {
+    /// Table alias -> row JSON map
+    tables: RowTables<'a>,
+    /// Shared ordered list of `(table_alias, column_names)` for deterministic `SELECT *` expansion
+    table_order: Arc<Vec<(String, Vec<String>)>>,
+}
+
+impl<'a> EvalRow<'a> {
+    #[inline]
+    fn from_borrowed_single(
+        alias: Arc<str>,
+        table_order: Arc<Vec<(String, Vec<String>)>>,
+        row: &'a Map<String, Value>,
+    ) -> Self {
+        Self {
+            tables: RowTables::Single(alias, RowMap::Borrowed(row)),
+            table_order,
+        }
+    }
+
+    fn from_owned_single(alias: &str, cols: &[String], row: Map<String, Value>) -> Self {
+        Self {
+            tables: RowTables::Single(Arc::from(alias), RowMap::Owned(Arc::new(row))),
+            table_order: Arc::new(vec![(alias.to_string(), cols.to_vec())]),
+        }
+    }
+
+    fn merge(&self, other: &EvalRow<'a>) -> Self {
+        let mut tables = self.tables.clone();
+        tables.extend_from(&other.tables);
+        let mut table_order = (*self.table_order).clone();
+        for item in other.table_order.iter() {
             if !table_order.iter().any(|(a, _)| a == &item.0) {
                 table_order.push(item.clone());
             }
         }
         Self {
             tables,
-            table_order,
+            table_order: Arc::new(table_order),
         }
     }
 
@@ -97,36 +209,34 @@ impl EvalRow {
         for c in cols {
             empty_map.insert(c.clone(), Value::Null);
         }
-        let mut tables = HashMap::new();
-        tables.insert(alias.to_string(), empty_map);
-        Self {
-            tables,
-            table_order: vec![(alias.to_string(), cols.to_vec())],
-        }
+        Self::from_owned_single(alias, cols, empty_map)
+    }
+
+    fn insert_owned_table_front(&mut self, alias: &str, cols: Vec<String>, map: Map<String, Value>) {
+        self.tables
+            .insert(Arc::from(alias), RowMap::Owned(Arc::new(map)));
+        let mut order = (*self.table_order).clone();
+        order.insert(0, (alias.to_string(), cols));
+        self.table_order = Arc::new(order);
     }
 
     /// Check if a name or prefix matches any known table alias or column name in this row.
     fn contains_column_or_alias(&self, name: &str) -> bool {
-        let lower = name.to_lowercase();
-        for (t_alias, cols) in &self.table_order {
-            if t_alias.to_lowercase() == lower {
+        for (t_alias, cols) in self.table_order.iter() {
+            if t_alias.eq_ignore_ascii_case(name) {
                 return true;
             }
-            if cols.iter().any(|c| c.to_lowercase() == lower) {
+            if cols.iter().any(|c| c.eq_ignore_ascii_case(name)) {
                 return true;
             }
         }
-        if name.contains('.') {
-            let parts: Vec<&str> = name.split('.').collect();
-            if let Some((first, _)) = parts.split_first() {
-                let first_lower = first.to_lowercase();
-                for (t_alias, cols) in &self.table_order {
-                    if t_alias.to_lowercase() == first_lower {
-                        return true;
-                    }
-                    if cols.iter().any(|c| c.to_lowercase() == first_lower) {
-                        return true;
-                    }
+        if let Some((first, _)) = name.split_once('.') {
+            for (t_alias, cols) in self.table_order.iter() {
+                if t_alias.eq_ignore_ascii_case(first) {
+                    return true;
+                }
+                if cols.iter().any(|c| c.eq_ignore_ascii_case(first)) {
+                    return true;
                 }
             }
         }
@@ -134,41 +244,44 @@ impl EvalRow {
     }
 
     /// Resolve a path of identifiers (`["u", "address", "city"]` or `["address", "city"]` or `["id"]`).
-    fn resolve_path(&self, parts: &[String]) -> Value {
+    fn resolve_path<S: AsRef<str>>(&self, parts: &[S]) -> Value {
         if parts.is_empty() {
             return Value::Null;
         }
+        let first_part = parts[0].as_ref();
 
-        // 1. Check if parts[0] is a known table alias
-        if let Some(table_map) = self.tables.get(&parts[0]) {
+        // 1. Check if parts[0] is a known table alias (exact or case-insensitive)
+        if let Some(table_map) = self.tables.get(first_part) {
             if parts.len() == 1 {
-                // If the table itself is a scalar unnested alias with a single column matching the alias
-                if let Some(v) = table_map.get(&parts[0]) {
+                if let Some(v) = table_map.get(first_part) {
                     return v.clone();
                 }
-                return Value::Object(table_map.clone());
+                return Value::Object((**table_map).clone());
             }
             return traverse_json_map(table_map, &parts[1..]);
         }
 
-        // Case-insensitive table alias check
-        let first_lower = parts[0].to_lowercase();
-        for (t_alias, table_map) in &self.tables {
-            if t_alias.to_lowercase() == first_lower {
-                if parts.len() == 1 {
-                    if let Some(v) = table_map.get(t_alias) {
-                        return v.clone();
-                    }
-                    return Value::Object(table_map.clone());
+        if let Some((t_alias, table_map)) = self.tables.get_ignore_case(first_part) {
+            if parts.len() == 1 {
+                if let Some(v) = table_map.get(t_alias) {
+                    return v.clone();
                 }
-                return traverse_json_map(table_map, &parts[1..]);
+                return Value::Object((**table_map).clone());
+            }
+            return traverse_json_map(table_map, &parts[1..]);
+        }
+
+        // 2. Fast path for single-table rows (no need to pre-probe has_column_IgnoreCase)
+        if self.table_order.len() == 1 {
+            if let RowTables::Single(_, ref table_map) = self.tables {
+                return traverse_json_map(table_map, parts);
             }
         }
 
-        // 2. Otherwise search across all tables in order for `parts[0]` as a column name
-        for (t_alias, _) in &self.table_order {
+        // 3. Multi-table search across all tables in order for `parts[0]` as a column name
+        for (t_alias, _) in self.table_order.iter() {
             if let Some(table_map) = self.tables.get(t_alias) {
-                if has_column_IgnoreCase(table_map, &parts[0]) {
+                if has_column_IgnoreCase(table_map, first_part) {
                     return traverse_json_map(table_map, parts);
                 }
             }
@@ -179,46 +292,51 @@ impl EvalRow {
 }
 
 #[allow(non_snake_case)]
+#[inline]
 fn has_column_IgnoreCase(map: &Map<String, Value>, key: &str) -> bool {
     if map.contains_key(key) {
         return true;
     }
-    let lower = key.to_lowercase();
-    map.keys().any(|k| k.to_lowercase() == lower)
+    map.keys().any(|k| k.eq_ignore_ascii_case(key))
 }
 
+#[inline]
 fn get_field_case_insensitive<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
     if let Some(v) = map.get(key) {
         return Some(v);
     }
-    let lower = key.to_lowercase();
     map.iter()
-        .find(|(k, _)| k.to_lowercase() == lower)
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
         .map(|(_, v)| v)
 }
 
-fn traverse_json_map(map: &Map<String, Value>, parts: &[String]) -> Value {
+fn traverse_json_map<S: AsRef<str>>(map: &Map<String, Value>, parts: &[S]) -> Value {
     if parts.is_empty() {
         return Value::Object(map.clone());
     }
-    // Check if the map contains a literal dotted key first (e.g. "a.b")
+
+    if let Some(first) = get_field_case_insensitive(map, parts[0].as_ref()) {
+        return traverse_json_value(first, &parts[1..]);
+    }
+
+    // Fallback: check if the map contains a literal dotted key (e.g. "a.b")
     if parts.len() > 1 {
-        let joined = parts.join(".");
+        let joined = parts
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>()
+            .join(".");
         if let Some(v) = get_field_case_insensitive(map, &joined) {
             return v.clone();
         }
     }
 
-    let first = match get_field_case_insensitive(map, &parts[0]) {
-        Some(v) => v,
-        None => return Value::Null,
-    };
-
-    traverse_json_value(first, &parts[1..])
+    Value::Null
 }
 
-fn traverse_json_value( mut current: &Value, parts: &[String]) -> Value {
-    for part in parts {
+fn traverse_json_value<S: AsRef<str>>(mut current: &Value, parts: &[S]) -> Value {
+    for part_ref in parts {
+        let part = part_ref.as_ref();
         match current {
             Value::Object(map) => {
                 if let Some(next) = get_field_case_insensitive(map, part) {
@@ -362,24 +480,6 @@ impl QueryEngine {
             }
         };
 
-        // 1. Evaluate FROM and JOINs (including lateral UNNESTs)
-        let working_rows = self.evaluate_from(&select.from)?;
-
-        // 2. Evaluate WHERE filter
-        let filtered_rows = if let Some(ref selection) = select.selection {
-            let mut kept = Vec::with_capacity(working_rows.len());
-            for row in working_rows {
-                let val = eval_scalar_expr(selection, &row)?;
-                if is_truthy(&val) {
-                    kept.push(row);
-                }
-            }
-            kept
-        } else {
-            working_rows
-        };
-
-        // 3. Expand any `SELECT UNNEST(...)` items if present (row-multiplying projection)
         // Check if query uses GROUP BY or aggregate functions
         let has_group_by = match &select.group_by {
             GroupByExpr::Expressions(exprs, _) => !exprs.is_empty(),
@@ -390,25 +490,102 @@ impl QueryEngine {
             }
         };
         let has_aggregates = select_has_aggregates(select);
+        let is_distinct = matches!(
+            select.distinct,
+            Some(sqlparser::ast::Distinct::Distinct)
+        );
+        let has_order_by = query.order_by.is_some();
+        let has_inline_unnest = select_has_inline_unnest(select);
 
+        // Compute early row cap if there is a LIMIT with no GROUP BY, aggregates, DISTINCT, ORDER BY, or inline UNNEST
+        let early_row_cap = if !has_group_by
+            && !has_aggregates
+            && !is_distinct
+            && !has_order_by
+            && !has_inline_unnest
+        {
+            if let Some(ref limit_expr) = query.limit {
+                let lim_val = eval_scalar_expr(limit_expr, &EvalRow::default())?;
+                if let Some(lim) = value_as_usize(&lim_val) {
+                    let off = if let Some(Offset { ref value, .. }) = query.offset {
+                        let off_val = eval_scalar_expr(value, &EvalRow::default())?;
+                        value_as_usize(&off_val).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    Some(off.saturating_add(lim))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Only cap FROM table scan directly if there is no WHERE clause, single table, no joins, no lateral UNNEST
+        let from_scan_cap = if select.selection.is_none()
+            && select.from.len() == 1
+            && select.from[0].joins.is_empty()
+            && extract_unnest_factor(&select.from[0].relation).is_none()
+        {
+            early_row_cap
+        } else {
+            None
+        };
+
+        // 1. Evaluate FROM and JOINs (including lateral UNNESTs)
+        let working_rows = self.evaluate_from(&select.from, from_scan_cap)?;
+
+        // 2. Evaluate WHERE filter (with early short-circuiting when early_row_cap is active)
+        let filtered_rows = if let Some(ref selection) = select.selection {
+            let cap = early_row_cap
+                .unwrap_or(working_rows.len())
+                .min(working_rows.len());
+            let mut kept = Vec::with_capacity(cap);
+            for row in working_rows {
+                if let Some(max_r) = early_row_cap {
+                    if kept.len() >= max_r {
+                        break;
+                    }
+                }
+                let val = eval_scalar_expr(selection, &row)?;
+                if is_truthy(&val) {
+                    kept.push(row);
+                }
+            }
+            kept
+        } else if let Some(max_r) = early_row_cap {
+            let mut rows = working_rows;
+            rows.truncate(max_r);
+            rows
+        } else {
+            working_rows
+        };
+
+        // 3. Projection
+        let need_ctx = is_distinct || has_order_by;
         let (columns, mut output_rows, mut order_context_rows) = if has_group_by || has_aggregates {
             self.evaluate_grouped_projection(select, &filtered_rows)?
         } else {
-            self.evaluate_scalar_projection(select, &filtered_rows)?
+            self.evaluate_scalar_projection(select, &filtered_rows, need_ctx)?
         };
 
-        // 4. DISTINCT
-        if matches!(
-            select.distinct,
-            Some(sqlparser::ast::Distinct::Distinct)
-        ) {
+        // 4. DISTINCT (O(N) hash deduplication preserving row order)
+        if is_distinct {
+            let mut seen_keys: HashSet<String> = HashSet::with_capacity(output_rows.len());
+            let mut key_buf = String::with_capacity(64);
             let mut unique_rows: Vec<Vec<Value>> = Vec::new();
-            let mut unique_ctx: Vec<EvalRow> = Vec::new();
+            let mut unique_ctx: Vec<EvalRow<'_>> = Vec::new();
             for (idx, row) in output_rows.into_iter().enumerate() {
-                if !unique_rows.iter().any(|existing| rows_equal(existing, &row)) {
+                canonical_row_key(&row, &mut key_buf);
+                if seen_keys.insert(key_buf.clone()) {
                     unique_rows.push(row);
-                    if let Some(ctx) = order_context_rows.get(idx) {
-                        unique_ctx.push(ctx.clone());
+                    if has_order_by {
+                        if let Some(ctx) = order_context_rows.get(idx) {
+                            unique_ctx.push(ctx.clone());
+                        }
                     }
                 }
             }
@@ -452,16 +629,20 @@ impl QueryEngine {
         })
     }
 
-    fn evaluate_from(&self, from: &[TableWithJoins]) -> Result<Vec<EvalRow>, EngineError> {
+    fn evaluate_from(
+        &self,
+        from: &[TableWithJoins],
+        scan_cap: Option<usize>,
+    ) -> Result<Vec<EvalRow<'_>>, EngineError> {
         if from.is_empty() {
             // Query without FROM (e.g. `SELECT 1 + 1`)
             return Ok(vec![EvalRow::default()]);
         }
 
-        let mut current_rows: Option<Vec<EvalRow>> = None;
+        let mut current_rows: Option<Vec<EvalRow<'_>>> = None;
 
         for twj in from {
-            current_rows = Some(self.apply_table_factor(current_rows, &twj.relation)?);
+            current_rows = Some(self.apply_table_factor(current_rows, &twj.relation, scan_cap)?);
             for join in &twj.joins {
                 let prev = current_rows.take().unwrap_or_default();
                 current_rows = Some(self.apply_join(prev, &join.relation, &join.join_operator)?);
@@ -471,11 +652,12 @@ impl QueryEngine {
         Ok(current_rows.unwrap_or_default())
     }
 
-    fn apply_table_factor(
-        &self,
-        existing: Option<Vec<EvalRow>>,
+    fn apply_table_factor<'a>(
+        &'a self,
+        existing: Option<Vec<EvalRow<'a>>>,
         factor: &TableFactor,
-    ) -> Result<Vec<EvalRow>, EngineError> {
+        scan_cap: Option<usize>,
+    ) -> Result<Vec<EvalRow<'a>>, EngineError> {
         // Check if this TableFactor is an UNNEST factor (either native AST UNNEST or `__unnest(...)` function factor)
         if let Some((array_expr, alias_name)) = extract_unnest_factor(factor) {
             let base_rows = existing.ok_or_else(|| {
@@ -486,7 +668,7 @@ impl QueryEngine {
             return apply_lateral_unnest(&base_rows, &array_expr, &alias_name);
         }
 
-        let factor_rows = self.load_table_factor_rows(factor)?;
+        let factor_rows = self.load_table_factor_rows(factor, scan_cap)?;
         match existing {
             None => Ok(factor_rows),
             Some(left_rows) => {
@@ -502,7 +684,11 @@ impl QueryEngine {
         }
     }
 
-    fn load_table_factor_rows(&self, factor: &TableFactor) -> Result<Vec<EvalRow>, EngineError> {
+    fn load_table_factor_rows(
+        &self,
+        factor: &TableFactor,
+        scan_cap: Option<usize>,
+    ) -> Result<Vec<EvalRow<'_>>, EngineError> {
         match factor {
             TableFactor::Table { name, alias, .. } => {
                 let raw_name = object_name_to_string(name);
@@ -512,11 +698,15 @@ impl QueryEngine {
                     .map(|a| a.name.value.clone())
                     .unwrap_or_else(|| table.name.clone());
 
-                let mut rows = Vec::with_capacity(table.rows.len());
-                for r in table.rows.iter() {
-                    rows.push(EvalRow::from_single_table(
-                        &effective_alias,
-                        &table.columns,
+                let alias_arc: Arc<str> = Arc::from(effective_alias.as_str());
+                let shared_order = Arc::new(vec![(effective_alias, table.columns.clone())]);
+                let take_n = scan_cap.unwrap_or(table.rows.len()).min(table.rows.len());
+
+                let mut rows = Vec::with_capacity(take_n);
+                for r in table.rows.iter().take(take_n) {
+                    rows.push(EvalRow::from_borrowed_single(
+                        Arc::clone(&alias_arc),
+                        Arc::clone(&shared_order),
                         r,
                     ));
                 }
@@ -536,10 +726,10 @@ impl QueryEngine {
                     for (col, val) in sub_res.columns.iter().zip(r) {
                         map.insert(col.clone(), val);
                     }
-                    rows.push(EvalRow::from_single_table(
+                    rows.push(EvalRow::from_owned_single(
                         &effective_alias,
                         &sub_res.columns,
-                        &map,
+                        map,
                     ));
                 }
                 Ok(rows)
@@ -551,18 +741,18 @@ impl QueryEngine {
         }
     }
 
-    fn apply_join(
-        &self,
-        left_rows: Vec<EvalRow>,
+    fn apply_join<'a>(
+        &'a self,
+        left_rows: Vec<EvalRow<'a>>,
         right_factor: &TableFactor,
         join_op: &JoinOperator,
-    ) -> Result<Vec<EvalRow>, EngineError> {
+    ) -> Result<Vec<EvalRow<'a>>, EngineError> {
         // Support `CROSS JOIN UNNEST(...)` or `JOIN UNNEST(...)`
         if let Some((array_expr, alias_name)) = extract_unnest_factor(right_factor) {
             return apply_lateral_unnest(&left_rows, &array_expr, &alias_name);
         }
 
-        let right_rows = self.load_table_factor_rows(right_factor)?;
+        let right_rows = self.load_table_factor_rows(right_factor, None)?;
         let (right_alias, right_cols) = right_rows
             .first()
             .and_then(|r| r.table_order.first().cloned())
@@ -570,7 +760,7 @@ impl QueryEngine {
 
         let left_template_orders: Vec<(String, Vec<String>)> = left_rows
             .first()
-            .map(|r| r.table_order.clone())
+            .map(|r| (*r.table_order).clone())
             .unwrap_or_default();
 
         match join_op {
@@ -665,19 +855,67 @@ impl QueryEngine {
         }
     }
 
-    fn evaluate_scalar_projection(
+    fn evaluate_scalar_projection<'a>(
         &self,
         select: &Select,
-        rows: &[EvalRow],
-    ) -> Result<ProjectionOutput, EngineError> {
+        rows: &[EvalRow<'a>],
+        need_ctx: bool,
+    ) -> Result<ProjectionOutput<'a>, EngineError> {
         let fallback_order = self.infer_from_table_order(&select.from);
         let columns = determine_projection_columns(&select.projection, rows, &fallback_order)?;
         let mut out_rows = Vec::with_capacity(rows.len());
-        let mut out_ctx = Vec::with_capacity(rows.len());
+        let mut out_ctx = if need_ctx {
+            Vec::with_capacity(rows.len())
+        } else {
+            Vec::new()
+        };
+
+        let has_inline_unnest = select_has_inline_unnest(select);
 
         for row in rows {
-            // Check if any projection item is an inline `UNNEST(expr)` call.
-            // Each entry is `(is_unnested_col, values_vec)`.
+            if !has_inline_unnest {
+                // Fast path: 1 output row per input row, no temporary Vec<(bool, Vec<Value>)> allocations
+                let mut single_row = Vec::with_capacity(columns.len());
+                for item in &select.projection {
+                    match item {
+                        SelectItem::Wildcard(_) => {
+                            for (t_alias, t_cols) in row.table_order.iter() {
+                                if let Some(t_map) = row.tables.get(t_alias) {
+                                    for c in t_cols {
+                                        let v = t_map.get(c).cloned().unwrap_or(Value::Null);
+                                        single_row.push(v);
+                                    }
+                                }
+                            }
+                        }
+                        SelectItem::QualifiedWildcard(obj_name, _) => {
+                            let t_name = object_name_to_string(obj_name);
+                            if let Some((t_alias, t_cols)) = row
+                                .table_order
+                                .iter()
+                                .find(|(a, _)| a.eq_ignore_ascii_case(&t_name))
+                            {
+                                if let Some(t_map) = row.tables.get(t_alias) {
+                                    for c in t_cols {
+                                        let v = t_map.get(c).cloned().unwrap_or(Value::Null);
+                                        single_row.push(v);
+                                    }
+                                }
+                            }
+                        }
+                        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                            single_row.push(eval_scalar_expr(expr, row)?);
+                        }
+                    }
+                }
+                out_rows.push(single_row);
+                if need_ctx {
+                    out_ctx.push(row.clone());
+                }
+                continue;
+            }
+
+            // Inline UNNEST path: each entry is `(is_unnested_col, values_vec)`.
             let mut row_cells_per_col: Vec<(bool, Vec<Value>)> =
                 Vec::with_capacity(select.projection.len());
             let mut unnest_len: Option<usize> = None;
@@ -685,7 +923,7 @@ impl QueryEngine {
             for item in &select.projection {
                 match item {
                     SelectItem::Wildcard(_) => {
-                        for (t_alias, t_cols) in &row.table_order {
+                        for (t_alias, t_cols) in row.table_order.iter() {
                             if let Some(t_map) = row.tables.get(t_alias) {
                                 for c in t_cols {
                                     let v = t_map.get(c).cloned().unwrap_or(Value::Null);
@@ -739,49 +977,46 @@ impl QueryEngine {
                         }
                     }
                     out_rows.push(single_row);
-                    out_ctx.push(row.clone());
+                    if need_ctx {
+                        out_ctx.push(row.clone());
+                    }
                 }
-            } else {
-                let single_row: Vec<Value> = row_cells_per_col
-                    .into_iter()
-                    .map(|(_, mut v)| v.pop().unwrap_or(Value::Null))
-                    .collect();
-                out_rows.push(single_row);
-                out_ctx.push(row.clone());
             }
         }
 
         Ok((columns, out_rows, out_ctx))
     }
 
-    fn evaluate_grouped_projection(
+    fn evaluate_grouped_projection<'a>(
         &self,
         select: &Select,
-        rows: &[EvalRow],
-    ) -> Result<ProjectionOutput, EngineError> {
+        rows: &[EvalRow<'a>],
+    ) -> Result<ProjectionOutput<'a>, EngineError> {
         let group_exprs: &[Expr] = match &select.group_by {
             GroupByExpr::Expressions(exprs, _) => exprs,
             GroupByExpr::All(_) => &[],
         };
 
-        // Partition rows into groups preserving insertion order
-        let mut groups: Vec<(Vec<Value>, Vec<EvalRow>)> = Vec::new();
+        // Partition rows into groups in O(N) using a canonical group key hash map
+        let mut groups: Vec<(Vec<Value>, Vec<EvalRow<'a>>)> = Vec::new();
 
         if group_exprs.is_empty() {
             // Single global group (e.g. `SELECT COUNT(*) FROM users`)
             groups.push((Vec::new(), rows.to_vec()));
         } else {
+            let mut group_index: HashMap<String, usize> = HashMap::new();
+            let mut key_buf = String::with_capacity(64);
             for row in rows {
                 let mut key_vals = Vec::with_capacity(group_exprs.len());
                 for g_expr in group_exprs {
                     key_vals.push(eval_scalar_expr(g_expr, row)?);
                 }
-                if let Some((_, bucket)) = groups
-                    .iter_mut()
-                    .find(|(k, _)| rows_equal(k, &key_vals))
-                {
-                    bucket.push(row.clone());
+                canonical_row_key(&key_vals, &mut key_buf);
+                if let Some(&idx) = group_index.get(&key_buf) {
+                    groups[idx].1.push(row.clone());
                 } else {
+                    let idx = groups.len();
+                    group_index.insert(key_buf.clone(), idx);
                     groups.push((key_vals, vec![row.clone()]));
                 }
             }
@@ -823,9 +1058,7 @@ impl QueryEngine {
             for (c_name, c_val) in columns.iter().zip(projected_row.iter()) {
                 alias_map.insert(c_name.clone(), c_val.clone());
             }
-            ctx.tables.insert("__agg_out__".to_string(), alias_map);
-            ctx.table_order
-                .insert(0, ("__agg_out__".to_string(), columns.clone()));
+            ctx.insert_owned_table_front("__agg_out__", columns.clone(), alias_map);
 
             out_rows.push(projected_row);
             out_ctx.push(ctx);
@@ -931,11 +1164,11 @@ fn default_unnest_alias(expr: &Expr) -> String {
     }
 }
 
-fn apply_lateral_unnest(
-    base_rows: &[EvalRow],
+fn apply_lateral_unnest<'a>(
+    base_rows: &[EvalRow<'a>],
     array_expr: &Expr,
     alias_name: &str,
-) -> Result<Vec<EvalRow>, EngineError> {
+) -> Result<Vec<EvalRow<'a>>, EngineError> {
     let mut out = Vec::new();
     for row in base_rows {
         let val = eval_scalar_expr(array_expr, row)?;
@@ -944,15 +1177,15 @@ fn apply_lateral_unnest(
                 let elem_row = match elem {
                     Value::Object(obj_map) => {
                         let cols: Vec<String> = obj_map.keys().cloned().collect();
-                        EvalRow::from_single_table(alias_name, &cols, &obj_map)
+                        EvalRow::from_owned_single(alias_name, &cols, obj_map)
                     }
                     scalar => {
                         let mut m = Map::new();
                         m.insert(alias_name.to_string(), scalar);
-                        EvalRow::from_single_table(
+                        EvalRow::from_owned_single(
                             alias_name,
                             &[alias_name.to_string()],
-                            &m,
+                            m,
                         )
                     }
                 };
@@ -961,6 +1194,15 @@ fn apply_lateral_unnest(
         }
     }
     Ok(out)
+}
+
+fn select_has_inline_unnest(select: &Select) -> bool {
+    select.projection.iter().any(|item| match item {
+        SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+            extract_inline_unnest_expr(e).is_some()
+        }
+        _ => false,
+    })
 }
 
 fn extract_inline_unnest_expr(expr: &Expr) -> Option<&Expr> {
@@ -979,7 +1221,7 @@ fn extract_inline_unnest_expr(expr: &Expr) -> Option<&Expr> {
     None
 }
 
-fn build_null_left(orders: &[(String, Vec<String>)]) -> EvalRow {
+fn build_null_left(orders: &[(String, Vec<String>)]) -> EvalRow<'static> {
     let mut row = EvalRow::default();
     for (alias, cols) in orders {
         let nr = EvalRow::null_for_table(alias, cols);
@@ -990,9 +1232,9 @@ fn build_null_left(orders: &[(String, Vec<String>)]) -> EvalRow {
 
 fn eval_join_constraint(
     constraint: &JoinConstraint,
-    left: &EvalRow,
-    right: &EvalRow,
-    merged: &EvalRow,
+    left: &EvalRow<'_>,
+    right: &EvalRow<'_>,
+    merged: &EvalRow<'_>,
 ) -> Result<bool, EngineError> {
     match constraint {
         JoinConstraint::On(expr) => {
@@ -1001,9 +1243,8 @@ fn eval_join_constraint(
         }
         JoinConstraint::Using(idents) => {
             for ident in idents {
-                let col = vec![ident.value.clone()];
-                let lv = left.resolve_path(&col);
-                let rv = right.resolve_path(&col);
+                let lv = left.resolve_path(std::slice::from_ref(&ident.value));
+                let rv = right.resolve_path(std::slice::from_ref(&ident.value));
                 if lv.is_null() || rv.is_null() || !values_equal(&lv, &rv) {
                     return Ok(false);
                 }
@@ -1019,7 +1260,7 @@ fn eval_join_constraint(
 
 fn determine_projection_columns(
     projection: &[SelectItem],
-    rows: &[EvalRow],
+    rows: &[EvalRow<'_>],
     fallback_order: &[(String, Vec<String>)],
 ) -> Result<Vec<String>, EngineError> {
     let mut cols = Vec::new();
@@ -1147,7 +1388,7 @@ fn expr_contains_aggregate(expr: &Expr) -> bool {
 /// Evaluate an expression in a `GROUP BY` context across a slice of grouped [`EvalRow`]s.
 fn eval_group_expr(
     expr: &Expr,
-    group_rows: &[EvalRow],
+    group_rows: &[EvalRow<'_>],
     _group_by_exprs: &[Expr],
 ) -> Result<Value, EngineError> {
     match expr {
@@ -1191,7 +1432,7 @@ fn eval_group_expr(
 fn eval_aggregate_function(
     name: &str,
     func: &Function,
-    group_rows: &[EvalRow],
+    group_rows: &[EvalRow<'_>],
 ) -> Result<Value, EngineError> {
     let mut is_wildcard = false;
     let mut is_distinct = false;
@@ -1233,14 +1474,23 @@ fn eval_aggregate_function(
     })?;
 
     let mut values = Vec::with_capacity(group_rows.len());
-    for row in group_rows {
-        let v = eval_scalar_expr(target_expr, row)?;
-        if !v.is_null() {
-            if is_distinct {
-                if !values.iter().any(|existing| values_equal(existing, &v)) {
+    if is_distinct {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut key_buf = String::with_capacity(32);
+        for row in group_rows {
+            let v = eval_scalar_expr(target_expr, row)?;
+            if !v.is_null() {
+                key_buf.clear();
+                canonical_value_key(&v, &mut key_buf);
+                if seen.insert(key_buf.clone()) {
                     values.push(v);
                 }
-            } else {
+            }
+        }
+    } else {
+        for row in group_rows {
+            let v = eval_scalar_expr(target_expr, row)?;
+            if !v.is_null() {
                 values.push(v);
             }
         }
@@ -1325,7 +1575,7 @@ fn eval_aggregate_function(
 }
 
 /// Evaluate a scalar SQL expression against a single [`EvalRow`].
-fn eval_scalar_expr(expr: &Expr, row: &EvalRow) -> Result<Value, EngineError> {
+fn eval_scalar_expr(expr: &Expr, row: &EvalRow<'_>) -> Result<Value, EngineError> {
     match expr {
         Expr::Value(sql_val) => eval_sql_literal(sql_val),
         Expr::Identifier(ident) => {
@@ -1337,10 +1587,25 @@ fn eval_scalar_expr(expr: &Expr, row: &EvalRow) -> Result<Value, EngineError> {
                 Ok(resolve_identifier_or_dot_path(&ident.value, row))
             }
         }
-        Expr::CompoundIdentifier(idents) => {
-            let parts: Vec<String> = idents.iter().map(|i| i.value.clone()).collect();
-            Ok(row.resolve_path(&parts))
-        }
+        Expr::CompoundIdentifier(idents) => match idents.as_slice() {
+            [a] => Ok(row.resolve_path(&[a.value.as_str()])),
+            [a, b] => Ok(row.resolve_path(&[a.value.as_str(), b.value.as_str()])),
+            [a, b, c] => Ok(row.resolve_path(&[
+                a.value.as_str(),
+                b.value.as_str(),
+                c.value.as_str(),
+            ])),
+            [a, b, c, d] => Ok(row.resolve_path(&[
+                a.value.as_str(),
+                b.value.as_str(),
+                c.value.as_str(),
+                d.value.as_str(),
+            ])),
+            _ => {
+                let parts: Vec<&str> = idents.iter().map(|i| i.value.as_str()).collect();
+                Ok(row.resolve_path(&parts))
+            }
+        },
         Expr::Nested(inner) => eval_scalar_expr(inner, row),
         Expr::UnaryOp { op, expr: inner } => {
             let v = eval_scalar_expr(inner, row)?;
@@ -1503,7 +1768,7 @@ fn eval_scalar_expr(expr: &Expr, row: &EvalRow) -> Result<Value, EngineError> {
                 .trim()
                 .trim_matches('\'')
                 .trim_matches('"');
-            let parts: Vec<String> = cleaned.split('.').map(|s| s.to_string()).collect();
+            let parts: Vec<&str> = cleaned.split('.').collect();
             Ok(traverse_json_value(&base_val, &parts))
         }
         Expr::Function(func) => {
@@ -1559,14 +1824,14 @@ fn eval_scalar_expr(expr: &Expr, row: &EvalRow) -> Result<Value, EngineError> {
     }
 }
 
-fn resolve_identifier_or_dot_path(ident: &str, row: &EvalRow) -> Value {
+fn resolve_identifier_or_dot_path(ident: &str, row: &EvalRow<'_>) -> Value {
     // First check exact match (in case column name has dots or is a simple identifier)
-    let exact = row.resolve_path(&[ident.to_string()]);
+    let exact = row.resolve_path(&[ident]);
     if !exact.is_null() {
         return exact;
     }
     if ident.contains('.') {
-        let parts: Vec<String> = ident.split('.').map(|s| s.to_string()).collect();
+        let parts: Vec<&str> = ident.split('.').collect();
         return row.resolve_path(&parts);
     }
     Value::Null
@@ -1839,8 +2104,8 @@ fn eval_cast(val: &Value, target_type: &str) -> Result<Value, EngineError> {
 
 fn sort_output_rows(
     columns: &[String],
-    output_rows: &mut [Vec<Value>],
-    context_rows: &[EvalRow],
+    output_rows: &mut Vec<Vec<Value>>,
+    context_rows: &[EvalRow<'_>],
     order_exprs: &[OrderByExpr],
 ) -> Result<(), EngineError> {
     // Precompute sort keys for each row
@@ -1913,10 +2178,59 @@ fn sort_output_rows(
 
     let sorted: Vec<Vec<Value>> = indices
         .into_iter()
-        .map(|i| output_rows[i].clone())
+        .map(|i| std::mem::take(&mut output_rows[i]))
         .collect();
-    output_rows.clone_from_slice(&sorted);
+    *output_rows = sorted;
     Ok(())
+}
+
+/// Write a canonical hash key for a slice of [`Value`]s into `out` (clears `out` first).
+fn canonical_row_key(row: &[Value], out: &mut String) {
+    out.clear();
+    for v in row {
+        canonical_value_key(v, out);
+        out.push('\x1f');
+    }
+}
+
+/// Append a canonical representation of a single [`Value`] to `out` such that equal values produce identical keys.
+fn canonical_value_key(val: &Value, out: &mut String) {
+    use std::fmt::Write;
+    match val {
+        Value::Null => out.push('N'),
+        Value::Bool(true) => out.push_str("B1"),
+        Value::Bool(false) => out.push_str("B0"),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                let _ = write!(out, "N{:.6}", i as f64);
+            } else if let Some(u) = n.as_u64() {
+                let _ = write!(out, "N{:.6}", u as f64);
+            } else if let Some(f) = n.as_f64() {
+                let norm = if f == 0.0 { 0.0 } else { f };
+                let _ = write!(out, "N{:.6}", norm);
+            }
+        }
+        Value::String(s) => {
+            let _ = write!(out, "S{}:{}", s.len(), s);
+        }
+        Value::Array(arr) => {
+            out.push('[');
+            for el in arr {
+                canonical_value_key(el, out);
+                out.push(',');
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            out.push('{');
+            for (k, v) in map {
+                let _ = write!(out, "{}:", k);
+                canonical_value_key(v, out);
+                out.push(',');
+            }
+            out.push('}');
+        }
+    }
 }
 
 /// Compare two JSON values with proper numeric, boolean, and lexicographical ordering.
@@ -1964,10 +2278,6 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Object(oa), Value::Object(ob)) => oa == ob,
         _ => false,
     }
-}
-
-fn rows_equal(a: &[Value], b: &[Value]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
 }
 
 fn is_truthy(val: &Value) -> bool {

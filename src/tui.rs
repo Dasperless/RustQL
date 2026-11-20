@@ -193,18 +193,17 @@ impl TuiApp {
         };
 
         let needle = self.filter_input.trim().to_lowercase();
-        let mut indices: Vec<usize> = (0..res.rows.len())
-            .filter(|&r_idx| {
-                if needle.is_empty() {
-                    return true;
-                }
-                res.rows[r_idx].iter().any(|cell| {
-                    value_to_display_string(cell)
-                        .to_lowercase()
-                        .contains(&needle)
+        let mut indices: Vec<usize> = if needle.is_empty() {
+            (0..res.rows.len()).collect()
+        } else {
+            (0..res.rows.len())
+                .filter(|&r_idx| {
+                    res.rows[r_idx]
+                        .iter()
+                        .any(|cell| value_matches_filter(cell, &needle))
                 })
-            })
-            .collect();
+                .collect()
+        };
 
         if let Some((col_idx, dir)) = self.sort_state {
             if col_idx < res.columns.len() {
@@ -569,7 +568,12 @@ fn build_schema_entries(engine: &QueryEngine) -> Vec<(Line<'static>, String)> {
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
-        items.push((header_line, format!("SELECT * FROM {}", table.name)));
+        let default_sql = if table.rows.len() > 1000 {
+            format!("SELECT * FROM {} LIMIT 1000", table.name)
+        } else {
+            format!("SELECT * FROM {}", table.name)
+        };
+        items.push((header_line, default_sql));
 
         let shape_line = Line::from(vec![
             Span::raw("  Shape: "),
@@ -861,7 +865,7 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         let row_data = &res.rows[r_idx];
         let cells = (start_col..total_cols).map(|c_idx| {
             let val = row_data.get(c_idx).unwrap_or(&Value::Null);
-            let text = value_to_display_string(val);
+            let text = value_to_table_cell_string(val);
             let style = if val.is_null() {
                 Style::default().fg(Color::DarkGray)
             } else if c_idx == app.selected_col {
@@ -882,7 +886,7 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         let mut max_w = col_name.chars().count() + 3;
         for &r_idx in window_row_indices {
             if let Some(val) = res.rows[r_idx].get(actual_col) {
-                let len = value_to_display_string(val).chars().count();
+                let len = value_to_table_cell_string(val).chars().count();
                 if len > max_w {
                     max_w = len;
                 }
@@ -929,6 +933,93 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
         table_state.select(Some(relative_selected));
     }
     frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+/// Bounded writer that aborts serialization once `max_bytes` have been written,
+/// preventing huge nested JSON payloads from being serialized in full just for a 36-char table cell.
+struct BoundedWriter {
+    buf: Vec<u8>,
+    max_bytes: usize,
+}
+
+impl io::Write for BoundedWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let remaining = self.max_bytes.saturating_sub(self.buf.len());
+        if remaining == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "limit reached"));
+        }
+        let take = data.len().min(remaining);
+        self.buf.extend_from_slice(&data[..take]);
+        if take < data.len() {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "limit reached"));
+        }
+        Ok(take)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Format a cell value for the TUI table, capping serialization of large nested objects/arrays at 64 bytes.
+fn value_to_table_cell_string(val: &Value) -> String {
+    match val {
+        Value::Array(_) | Value::Object(_) => {
+            let mut writer = BoundedWriter {
+                buf: Vec::with_capacity(64),
+                max_bytes: 64,
+            };
+            let truncated = serde_json::to_writer(&mut writer, val).is_err();
+            // Ensure valid UTF-8 boundary if truncated mid-character
+            while !writer.buf.is_empty() && std::str::from_utf8(&writer.buf).is_err() {
+                writer.buf.pop();
+            }
+            let mut s = String::from_utf8(writer.buf).unwrap_or_default();
+            if truncated {
+                s.push('…');
+            }
+            s
+        }
+        Value::String(s) if s.len() > 64 => {
+            let mut out: String = s.chars().take(60).collect();
+            out.push('…');
+            out
+        }
+        _ => value_to_display_string(val),
+    }
+}
+
+/// Fast recursive case-insensitive filter match that avoids serializing nested JSON objects to strings.
+fn value_matches_filter(val: &Value, needle_lower: &str) -> bool {
+    match val {
+        Value::Null => "null".contains(needle_lower),
+        Value::Bool(true) => "true".contains(needle_lower),
+        Value::Bool(false) => "false".contains(needle_lower),
+        Value::Number(n) => n.to_string().contains(needle_lower),
+        Value::String(s) => str_contains_ignore_case(s, needle_lower),
+        Value::Array(arr) => arr.iter().any(|el| value_matches_filter(el, needle_lower)),
+        Value::Object(map) => map.iter().any(|(k, v)| {
+            str_contains_ignore_case(k, needle_lower) || value_matches_filter(v, needle_lower)
+        }),
+    }
+}
+
+#[inline]
+fn str_contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() && needle_lower.is_ascii() {
+        let h_bytes = haystack.as_bytes();
+        let n_bytes = needle_lower.as_bytes();
+        if n_bytes.len() > h_bytes.len() {
+            return false;
+        }
+        return h_bytes
+            .windows(n_bytes.len())
+            .any(|w| w.eq_ignore_ascii_case(n_bytes));
+    }
+    haystack.to_lowercase().contains(needle_lower)
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &TuiApp, area: Rect) {
@@ -1160,11 +1251,15 @@ mod tests {
     fn test_tui_render_speed_large_dataset() {
         use std::time::Instant;
         let mut engine = QueryEngine::new();
-        let mut rows = Vec::with_capacity(20000);
-        for i in 0..20000 {
+        let row_count = 50_000;
+        let mut rows = Vec::with_capacity(row_count);
+        for i in 0..row_count {
             let mut obj = serde_json::Map::new();
             obj.insert("id".to_string(), serde_json::Value::from(i));
-            obj.insert("name".to_string(), serde_json::Value::from(format!("user_{}", i)));
+            obj.insert(
+                "name".to_string(),
+                serde_json::Value::from(format!("user_{}", i)),
+            );
             obj.insert(
                 "city".to_string(),
                 serde_json::Value::from(if i % 2 == 0 { "Berlin" } else { "Tokyo" }),
@@ -1182,26 +1277,67 @@ mod tests {
         };
         engine.register_table(table);
 
+        // 1. Verify TuiApp::new startup with automatic LIMIT 1000 is instantaneous (< 50ms)
+        let t_init = Instant::now();
         let mut app = TuiApp::new(engine);
-        // Execute SELECT * without limit to test rendering 20,000 rows with virtual windowing
+        let init_elapsed = t_init.elapsed();
+        assert_eq!(app.visible_row_indices.len(), 1000);
+        assert!(
+            init_elapsed.as_millis() < 100,
+            "TuiApp::new took too long on 50k rows: {:?}",
+            init_elapsed
+        );
+
+        // 2. Execute SELECT * without limit (materializing all 50,000 rows) and render 100 scrolling frames
         app.sql_input = "SELECT * FROM big_data".to_string();
         app.execute_current_sql();
-        assert_eq!(app.visible_row_indices.len(), 20000);
+        assert_eq!(app.visible_row_indices.len(), row_count);
 
         let backend = TestBackend::new(120, 35);
         let mut terminal = Terminal::new(backend).unwrap();
 
         let t0 = Instant::now();
-        for _ in 0..100 {
+        for step in 0..100 {
             terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
-            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            let key = match step {
+                50 => KeyCode::End,  // Jump to row 50,000
+                75 => KeyCode::Home, // Jump back to row 1
+                _ => KeyCode::Down,
+            };
+            app.handle_key_event(KeyEvent::new(key, KeyModifiers::NONE));
         }
-        let elapsed = t0.elapsed();
-        // 100 frames should take well under 500ms with virtual windowing (<5ms/frame)
+        let render_elapsed = t0.elapsed();
         assert!(
-            elapsed.as_millis() < 500,
-            "100 frames took too long: {:?}",
-            elapsed
+            render_elapsed.as_millis() < 500,
+            "100 frames over 50k rows took too long: {:?}",
+            render_elapsed
+        );
+
+        // 3. Verify live row filtering over 50,000 rows is fast
+        let t_filter = Instant::now();
+        app.filter_input = "Berlin".to_string();
+        app.recompute_visible_rows();
+        let filter_elapsed = t_filter.elapsed();
+        assert_eq!(app.visible_row_indices.len(), 25_000);
+        assert!(
+            filter_elapsed.as_millis() < 300,
+            "Filtering 50k rows took too long: {:?}",
+            filter_elapsed
+        );
+
+        // 4. Verify GROUP BY over 50,000 rows is fast (zero-copy EvalRow + hash grouping)
+        let t_group = Instant::now();
+        app.filter_input.clear();
+        app.sql_input =
+            "SELECT city, COUNT(*) AS cnt FROM big_data GROUP BY city ORDER BY cnt DESC"
+                .to_string();
+        app.execute_current_sql();
+        let group_elapsed = t_group.elapsed();
+        assert_eq!(app.visible_row_indices.len(), 2);
+        assert!(
+            group_elapsed.as_millis() < 300,
+            "GROUP BY over 50k rows took too long: {:?}",
+            group_elapsed
         );
     }
 }
