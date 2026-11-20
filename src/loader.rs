@@ -359,24 +359,31 @@ fn stream_parse_top_level_array<R: BufRead>(
     Ok(rows)
 }
 
-/// Stream-parse an NDJSON / JSON Lines reader line-by-line (with multi-line fallback).
+/// Stream-parse an NDJSON / JSON Lines reader line-by-line reusing a single buffer.
 fn stream_parse_ndjson<R: BufRead>(
-    reader: R,
+    mut reader: R,
     path_label: &str,
 ) -> Result<Vec<Map<String, Value>>, LoaderError> {
     let mut rows = Vec::new();
-    for (idx, line_res) in reader.lines().enumerate() {
-        let line = line_res.map_err(|e| LoaderError::Io {
+    let mut line = String::with_capacity(4096);
+    let mut idx = 0usize;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).map_err(|e| LoaderError::Io {
             path: path_label.to_string(),
             source: e,
         })?;
+        if n == 0 {
+            break;
+        }
+        idx += 1;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
         let val: Value = serde_json::from_str(trimmed).map_err(|e| LoaderError::JsonParse {
             path: path_label.to_string(),
-            message: format!("Line {}: {}", idx + 1, e),
+            message: format!("Line {}: {}", idx, e),
         })?;
         rows.push(value_to_row_map(val));
     }
@@ -470,13 +477,13 @@ pub fn load_json_file(
     let (shape, rows) = match first_b {
         b'[' => {
             // Stream-parse top-level array
-            let reader = BufReader::with_capacity(64 * 1024, file);
+            let reader = BufReader::with_capacity(256 * 1024, file);
             let parsed_rows = stream_parse_top_level_array(reader, &path_label)?;
             (JsonShape::TopLevelArray, parsed_rows)
         }
         b'{' => {
             // Check if the first line is a complete JSON object followed by another line starting with '{'
-            let mut reader = BufReader::with_capacity(64 * 1024, file);
+            let mut reader = BufReader::with_capacity(256 * 1024, file);
             let mut first_line = String::new();
             loop {
                 first_line.clear();
@@ -551,9 +558,12 @@ pub fn load_json_file(
         }
     };
 
-    // Write normalized NDJSON cache for fast subsequent loads (e.g. top-level arrays or nested objects)
+    // Write normalized NDJSON cache for fast subsequent loads (e.g. top-level arrays or nested objects).
+    // Skip re-serializing large (> 1 MB) files that are already in NDJSON format on disk.
     if let Some(ref cdir) = effective_cache_dir {
-        let _ = write_to_cache(cdir, path, file_size, modified_nanos, &shape, &rows);
+        if shape != JsonShape::Ndjson || file_size <= 1_048_576 {
+            let _ = write_to_cache(cdir, path, file_size, modified_nanos, &shape, &rows);
+        }
     }
 
     let (columns, schema_fields) = infer_columns_and_schema(&rows);
@@ -705,8 +715,8 @@ fn collect_schema_for_key(
         depth,
     });
 
-    // If it's a nested object, recursively collect subfields up to depth 4
-    if depth < 4 {
+    // If it's a nested object, recursively collect subfields up to depth 3
+    if depth < 3 {
         let mut sub_rows: Vec<Map<String, Value>> = Vec::new();
         for row in &rows[..sample_limit] {
             if let Some(Value::Object(sub_map)) = row.get(top_or_sub_key) {
@@ -720,6 +730,12 @@ fn collect_schema_for_key(
                     if !sub_keys.contains(k) {
                         sub_keys.push(k.clone());
                     }
+                    if sub_keys.len() >= 20 {
+                        break;
+                    }
+                }
+                if sub_keys.len() >= 20 {
+                    break;
                 }
             }
             for sk in sub_keys {
