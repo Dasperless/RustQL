@@ -37,7 +37,9 @@ fn main() {
                 print!("{}", output);
             }
             Err(err) => {
-                eprintln!("Query error: {}", err);
+                let friendly =
+                    rustrix::sql_helper::diagnose_sql_error(sql, &err.to_string(), &engine);
+                eprintln!("Query error: {}", friendly);
                 process::exit(1);
             }
         }
