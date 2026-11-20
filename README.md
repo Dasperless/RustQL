@@ -41,47 +41,164 @@ Built with `#![forbid(unsafe_code)]`, zero C/C++ dependencies, zero memory leaks
 
 ---
 
-## Installation & Prebuilt Binaries
+## Installation & Quick Start
 
-### Option 1: Download Prebuilt Release Archives
+### 1. Automated One-Line Installers (Recommended: Zero Warnings)
 
-Download the prebuilt archive for your platform from [GitHub Releases](https://github.com/Dasperless/Rustrix/releases):
+Install Rustrix in seconds without manual unzipping, path configuration, or security warnings.
 
-| Platform | Architecture | Release Archive |
-| --- | --- | --- |
-| **Linux** | `x86_64` | `rustrix-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
-| **macOS** (Apple Silicon) | `aarch64` (`M1`–`M4`) | `rustrix-v0.1.0-aarch64-apple-darwin.tar.gz` |
-| **macOS** (Intel) | `x86_64` | `rustrix-v0.1.0-x86_64-apple-darwin.tar.gz` |
-| **Windows** | `x86_64` (MSVC) | `rustrix-v0.1.0-x86_64-pc-windows-msvc.zip` |
+#### Windows (PowerShell / Windows Terminal)
 
-#### Binary Verification & Platform Notes
-- **Checksum Verification**: Every release provides a `SHA256SUMS` file:
+Run in **PowerShell** or **Windows Terminal**:
+
+```powershell
+irm https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.ps1 | iex
+```
+
+> [!TIP]
+> **Zero Warnings Guaranteed**: The installer installs to `%LOCALAPPDATA%\Programs\rustrix` (requiring **zero administrator privileges** and **zero UAC elevation prompts**), automatically adds `rustrix` to your User `PATH`, and strips the Windows "Mark of the Web" via `Unblock-File` so that **Microsoft Defender SmartScreen never blocks or warns** when launching `rustrix.exe`.
+>
+> If your PowerShell restricts script execution, run with execution-policy bypass:
+> ```powershell
+> powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.ps1 | iex"
+> ```
+
+#### Windows (Scoop Package Manager)
+
+If you use [Scoop](https://scoop.sh/):
+
+```powershell
+scoop install https://raw.githubusercontent.com/Dasperless/Rustrix/main/scoop/rustrix.json
+```
+
+Scoop installs the binary, shims it into your `PATH`, and unblocks it without any SmartScreen warnings.
+
+#### Linux & macOS
+
+Run in `bash` or `zsh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.sh | bash
+```
+
+Auto-detects your OS (Linux / macOS) and CPU architecture (`x86_64` / Apple Silicon `aarch64`), verifies the SHA256 checksum against GitHub Releases, installs the binary to `~/.local/bin` (or `/usr/local/bin`), and configures executable permissions.
+
+---
+
+### 2. Manual Prebuilt Binary Downloads
+
+Download the prebuilt archive for your platform directly from [GitHub Releases](https://github.com/Dasperless/Rustrix/releases):
+
+| Platform | Architecture | Release Archive | Package Format |
+| --- | --- | --- | --- |
+| **Windows** | `x86_64` (MSVC) | `rustrix-v0.1.0-x86_64-pc-windows-msvc.zip` | `.zip` with `rustrix.exe` + `install.ps1` |
+| **Linux** | `x86_64` (glibc >= 2.31) | `rustrix-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` | `.tar.gz` with `rustrix` + `install.sh` |
+| **macOS** (Apple Silicon) | `aarch64` (`M1`–`M4`) | `rustrix-v0.1.0-aarch64-apple-darwin.tar.gz` | `.tar.gz` with signed Mach-O binary |
+| **macOS** (Intel) | `x86_64` | `rustrix-v0.1.0-x86_64-apple-darwin.tar.gz` | `.tar.gz` with signed Mach-O binary |
+
+---
+
+### 3. Windows Setup & Zero-Warning Guide
+
+Windows security features (Microsoft Defender SmartScreen, UAC, and ExecutionPolicy) may sometimes present warnings when downloading unsigned third-party tools from web browsers. Rustrix is built and packaged with extensive mitigations so you can run it completely warning-free:
+
+#### Preventing SmartScreen Warnings ("Windows protected your PC")
+- **Why it happens**: When you download a `.zip` or `.exe` through a web browser (Edge, Chrome, Firefox), Windows attaches an NTFS alternate data stream called **Mark of the Web (Zone.Identifier = 3)**.
+- **How to avoid it entirely**:
+  1. **Use the PowerShell 1-liner**: `irm https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.ps1 | iex` (downloads directly via PowerShell and automatically executes `Unblock-File`).
+  2. **Or unblock manually via PowerShell**:
+     ```powershell
+     # Unblock the downloaded zip BEFORE extracting:
+     Unblock-File .\rustrix-v0.1.0-x86_64-pc-windows-msvc.zip
+
+     # Or unblock the extracted executable:
+     Unblock-File .\rustrix.exe
+     ```
+  3. **Or unblock via File Explorer**:
+     - Right-click `rustrix-v0.1.0-x86_64-pc-windows-msvc.zip` (or `rustrix.exe`) $\rightarrow$ Click **Properties**.
+     - In the **General** tab at the bottom, check the **Unblock** checkbox.
+     - Click **Apply** and **OK**.
+  4. **Or bypass the one-time SmartScreen popup**:
+     - If the blue "Windows protected your PC" dialog appears, click **More info** $\rightarrow$ Click **Run anyway**.
+
+#### Built-in Windows Hardening
+Every official Windows release binary of Rustrix includes:
+- **Embedded Application Manifest**: Compiled with `<requestedExecutionLevel level="asInvoker" uiAccess="false"/>` so it **never requests administrator rights or triggers UAC prompts**.
+- **Windows 10/11 Compatibility GUIDs**: Explicitly declares `<supportedOS>` compatibility with Windows 10 and Windows 11.
+- **Native UTF-8 Codepage**: Embedded `<activeCodePage>UTF-8</activeCodePage>` ensures modern Unicode table borders and symbols render accurately without requiring manual terminal configuration.
+- **Long Path Support**: Embedded `<longPathAware>true</longPathAware>` eliminates the legacy 260-character `MAX_PATH` file path limitation.
+- **Embedded PE `VS_VERSION_INFO`**: Embeds company name, product version, description, and copyright metadata into the `.exe` header to pass antivirus heuristic inspections.
+
+#### Recommended Terminal on Windows
+- Use **[Windows Terminal](https://aka.ms/terminal)** (default in Windows 11; install via Microsoft Store or `winget install Microsoft.WindowsTerminal` in Windows 10) for true 24-bit color, UTF-8 box-drawing characters, and mouse-wheel scrolling.
+- If using legacy `cmd.exe`, run `chcp 65001` before launching Rustrix if Unicode table borders appear distorted.
+
+#### PowerShell SQL Quoting Note
+In PowerShell, double-quoted strings (`"..."`) interpret `$` as variable expressions (e.g. `$col`). When passing SQL queries on the command line via `-q`, **wrap the query in single quotes (`'...'`)**:
+```powershell
+rustrix -q 'SELECT id, name, department, salary FROM users WHERE salary > 70000' examples\users.json
+```
+Both backslashes (`examples\users.json`) and forward slashes (`examples/users.json`) are fully supported.
+
+---
+
+### 4. Linux & macOS Setup Guide
+
+#### Linux Setup
+1. Run the one-line installer:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.sh | bash
+   ```
+2. Or extract manually and copy to `/usr/local/bin` or `~/.local/bin`:
+   ```bash
+   tar -xzf rustrix-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+   sudo install -m 755 rustrix-v0.1.0-x86_64-unknown-linux-gnu/rustrix /usr/local/bin/
+   ```
+3. Works out of the box in all terminal emulators: GNOME Terminal, Alacritty, Kitty, Konsole, foot, xterm, and `tmux`.
+
+#### macOS Setup
+Release binaries are ad-hoc signed (`codesign`). If you download via a browser (Safari/Chrome) and macOS flags the file:
+```bash
+xattr -d com.apple.quarantine ./rustrix
+```
+The automated `install.sh` script clears this attribute automatically.
+
+---
+
+### 5. Checksum & Provenance Verification
+
+- **Checksums (`SHA256SUMS`)**:
   ```bash
+  # Linux
   sha256sum -c SHA256SUMS --ignore-missing
+
+  # macOS
+  shasum -a 256 -c SHA256SUMS --ignore-missing
+
+  # Windows (PowerShell)
+  (Get-FileHash -Algorithm SHA256 .\rustrix-v0.1.0-x86_64-pc-windows-msvc.zip).Hash -eq (Get-Content .\rustrix-v0.1.0-x86_64-pc-windows-msvc.zip.sha256).Split(" ")[0]
   ```
-- **GitHub Build Provenance Attestation**: All release archives are cryptographically attested in GitHub Actions and can be verified with the GitHub CLI:
+- **Cryptographic Build Provenance**:
+  Verify the release archive's origin directly through GitHub CLI:
   ```bash
-  gh attestation verify rustrix-v0.1.0-<target>.tar.gz --repo Dasperless/Rustrix
-  ```
-- **Windows**: Release binaries (`rustrix.exe`) are packaged in `.zip` archives with an embedded Windows Application Manifest (`requestedExecutionLevel level="asInvoker"`, Windows 10/11 `<supportedOS>` compatibility GUIDs, UTF-8 codepage) and PE `VS_VERSION_INFO` version metadata.
-- **macOS**: Release binaries are signed with an ad-hoc Mach-O signature (`codesign --verify`). If downloaded via a web browser that attaches the `com.apple.quarantine` attribute, clear it after extracting:
-  ```bash
-  xattr -d com.apple.quarantine ./rustrix
+  gh attestation verify rustrix-v0.1.0-x86_64-unknown-linux-gnu.tar.gz --repo Dasperless/Rustrix
   ```
 
-### Option 2: Build from Source with Cargo
+---
 
-Requires a standard Rust toolchain (`cargo` and `rustc` >= 1.80). No C compiler or native system libraries are required.
+### 6. Build from Source with Cargo
+
+Requires standard Rust toolchain (`cargo` and `rustc` >= 1.80). No C/C++ compiler or external system libraries are needed:
 
 ```bash
 # Build optimized release binary
 cargo build --release
 
-# The compiled binary will be located at:
+# Binary is placed at:
 ./target/release/rustrix --version
 ```
 
-Run the test suite:
+Run the full test suite:
 
 ```bash
 cargo test
