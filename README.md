@@ -93,9 +93,12 @@ Each file's stem becomes its SQL table name:
 | `s` (in Result Table) | Sort table by currently selected column (`ASC ▲` → `DESC ▼` → `Unsorted`) |
 | `f` (in Result Table) | Focus the live **Quick Row Search** input |
 | `c` (in Result Table) | Clear active row filter and interactive column sort |
-| `Enter` or `d` (in Result Table) | Open the **Row & Cell JSON Detail Inspector** modal (with JSON color coding & embedded JSON auto-formatting) |
-| `j`/`k`/`PgUp`/`PgDn`/`g`/`G` (in JSON Inspector) | Scroll vertically through large Selected Cell and Full Row JSON content |
+| `Enter` or `d` (in Result Table) | Open the **Row & Cell JSON Detail Inspector** modal (with JSON color coding, collapsible fields, & embedded JSON auto-formatting) |
+| `j`/`k`/`PgUp`/`PgDn`/`g`/`G` (in JSON Inspector) | Move the line cursor (with auto-scrolling) through Selected Cell and Full Row JSON content |
+| `Space` or `Enter` (in JSON Inspector) | Toggle collapse / expand (`▾` / `▸ { … N fields }` / `▸ [ … N items ]`) on the selected JSON field or container |
+| `a` (in JSON Inspector) | Toggle collapse / expand all JSON fields in the inspector |
 | `h`/`l` or `Left`/`Right` (in JSON Inspector) | Switch the inspected column cell live without closing the modal |
+| `Esc` / `q` / `d` (in JSON Inspector) | Close the JSON Detail Inspector modal |
 | `?` or `F1` | Open keyboard shortcuts Help modal |
 | `q` or `Ctrl+C` | Quit Rustrix |
 
