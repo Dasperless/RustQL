@@ -1,19 +1,24 @@
 # Rustrix
 
-**Rustrix** is a pure-Rust Terminal UI (TUI) and CLI for running SQL queries against JSON files (`[ ... ]` top-level arrays, NDJSON/JSON Lines, and deeply nested JSON objects).
+[![CI](https://github.com/Dasperless/Rustrix/actions/workflows/ci.yml/badge.svg)](https://github.com/Dasperless/Rustrix/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Dasperless/Rustrix)](https://github.com/Dasperless/Rustrix/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Pure Rust](https://img.shields.io/badge/Rust-100%25%20Safe%20(%23!%5Bforbid(unsafe__code)%5D)-orange.svg)](src/lib.rs)
 
-Built with zero C/C++ dependencies and 100% permissive (`MIT` / `Apache-2.0`) licensing across the entire dependency tree.
+**Rustrix** is a fast, pure-Rust Terminal UI (TUI) and command-line interface (CLI) for running SQL queries directly against JSON and NDJSON files (`[ ... ]` top-level arrays, NDJSON/JSON Lines, nested wrapper objects, and single JSON records).
+
+Built with `#![forbid(unsafe_code)]`, zero C/C++ dependencies, zero memory leaks (verified under Valgrind), and 100% permissive (`MIT` / `Apache-2.0`) licensing across the entire dependency tree.
 
 ---
 
 ## Features
 
 - **Pure-Rust SQL Execution Engine** (`sqlparser` + `serde_json`):
-  - `SELECT` projections, column aliases (`AS`), `*`, `table.*`, `DISTINCT`, `CASE WHEN`, `CAST`, arithmetic, and scalar functions (`LOWER`, `UPPER`, `LENGTH`, `COALESCE`, `ROUND`, `ABS`, `TRIM`, `CONCAT`).
-  - `WHERE` filtering (`=`, `!=`, `<`, `<=`, `>`, `>=`, `AND`, `OR`, `NOT`, `LIKE`, `ILIKE`, `IN (...)`, `BETWEEN ... AND ...`, `IS NULL`, `IS NOT NULL`).
-  - `GROUP BY` and `HAVING` with aggregate functions (`COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM`, `AVG`, `MIN`, `MAX`).
+  - `SELECT` projections, column aliases (`AS`), `*`, `table.*`, `DISTINCT`, `CASE WHEN`, `CAST`, checked arithmetic, and scalar functions (`LOWER`, `UPPER`, `LENGTH`, `LEN`, `ARRAY_LENGTH`, `COALESCE`, `IFNULL`, `ROUND`, `ABS`, `TRIM`, `CONCAT`).
+  - `WHERE` filtering (`=`, `!=`, `<`, `<=`, `>`, `>=`, `AND`, `OR`, `NOT`, `LIKE`, `ILIKE`, `IN (...)`, `BETWEEN ... AND ...`, `IS NULL`, `IS NOT NULL`, single- or double-quoted string literals).
+  - `GROUP BY` and `HAVING` with O(N) hash grouping and aggregate functions (`COUNT(*)`, `COUNT(col)`, `COUNT(DISTINCT col)`, `SUM`, `AVG`, `MIN`, `MAX`).
   - Multi-file `JOIN` (`INNER JOIN`, `LEFT JOIN`, `RIGHT JOIN`, `FULL OUTER JOIN`, `CROSS JOIN`) with `ON` or `USING`.
-  - `ORDER BY` (single or multiple columns, `ASC`/`DESC`), `LIMIT`, and `OFFSET`.
+  - `ORDER BY` (single or multiple columns, `ASC`/`DESC`, positional column numbers), `LIMIT`, and `OFFSET` with early scan short-circuiting.
   - **Nested Field Access & Array Unnesting**:
     - Traverse nested objects with standard dot paths (`user.address.city`, `warehouse.aisle`).
     - Index into arrays (`items[0].name`, `suppliers[0]`).
@@ -25,26 +30,56 @@ Built with zero C/C++ dependencies and 100% permissive (`MIT` / `Apache-2.0`) li
     2. **NDJSON / JSON Lines** (newline-delimited JSON records)
     3. **Nested Object Wrapping a Primary Array** (e.g., `{ "api_version": "2.1", "records": [ {...} ] }` — automatically extracts the `records` array)
     4. **Single Nested JSON Object** (treated as a 1-row record whose fields and nested arrays can be queried or unnested)
-- **Streaming & Read-Only Disk Caching**:
+- **Streaming & Hardened Read-Only Disk Caching**:
   - Input files are **strictly read-only** and are never modified in place.
   - Top-level JSON arrays and NDJSON files are parsed with buffered streaming readers.
-  - Converted/normalized NDJSON data is cached in the system temp directory (`/tmp/rustrix_cache`, keyed by canonical path, file size, and modification timestamp) so repeat queries and subsequent invocations skip re-parsing from scratch.
+  - Normalized NDJSON cache files are stored in the system temp directory (`/tmp/rustrix_cache`, keyed by canonical path, file size, and nanosecond modification timestamp) using owner-only permissions (`0700` directory / `0600` files on Unix), symlink rejection, atomic rename writes, and automatic LRU cache pruning.
 - **3-Pane Interactive Terminal UI (TUI)**:
   - **Left Sidebar**: Loaded tables, auto-detected JSON shape, row count, cache status, and an expandable recursive schema tree with inferred types (`Int`, `Float`, `String`, `Bool`, `Array<T>`, `Object`).
-  - **Top Bar**: SQL Query Editor (with `Up`/`Down` query history) + live Row Filter box (`f`).
-  - **Main Result Table**: Scrollable (vertical & horizontal), column-sortable (`s`), filterable, and JSON type/syntax color-coded table with a scrollable, syntax-highlighted **Row & Cell JSON Inspector** (`Enter` or `d`) for viewing large or deeply nested JSON values.
+  - **Top Bar**: Guided SQL Query Editor (with live syntax/schema validation, `"Did you mean...?"` typo diagnostics, inline ghost-text completion, context-aware autocomplete dropdown, and `Ctrl+Up`/`Ctrl+Down` query history) + live Row Search box (`f`).
+  - **Main Result Table**: Virtualized (50,000+ rows at 60+ FPS), scrollable (vertical & horizontal), column-sortable (`s`), filterable, and JSON type/syntax color-coded table with a one-key **Quick SQL Filter menu** (`w`), **SQL Recipe & Template Picker** (`t` / `Ctrl+T`), and a scrollable, syntax-highlighted **Row & Cell JSON Detail Inspector** (`Enter` or `d`) with collapsible JSON fields (`Space` / `Enter` / `a`).
 
 ---
 
-## Installation & Build
+## Installation & Prebuilt Binaries
 
-Requires a standard Rust toolchain (`cargo` and `rustc`). No C compiler or native system libraries are required.
+### Option 1: Download Prebuilt Release Archives
+
+Download the prebuilt archive for your platform from [GitHub Releases](https://github.com/Dasperless/Rustrix/releases):
+
+| Platform | Architecture | Release Archive |
+| --- | --- | --- |
+| **Linux** | `x86_64` | `rustrix-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
+| **macOS** (Apple Silicon) | `aarch64` (`M1`–`M4`) | `rustrix-v0.1.0-aarch64-apple-darwin.tar.gz` |
+| **macOS** (Intel) | `x86_64` | `rustrix-v0.1.0-x86_64-apple-darwin.tar.gz` |
+| **Windows** | `x86_64` (MSVC) | `rustrix-v0.1.0-x86_64-pc-windows-msvc.zip` |
+
+#### Binary Verification & Platform Notes
+- **Checksum Verification**: Every release provides a `SHA256SUMS` file:
+  ```bash
+  sha256sum -c SHA256SUMS --ignore-missing
+  ```
+- **GitHub Build Provenance Attestation**: All release archives are cryptographically attested in GitHub Actions and can be verified with the GitHub CLI:
+  ```bash
+  gh attestation verify rustrix-v0.1.0-<target>.tar.gz --repo Dasperless/Rustrix
+  ```
+- **Windows**: Release binaries (`rustrix.exe`) are packaged in `.zip` archives with an embedded Windows Application Manifest (`requestedExecutionLevel level="asInvoker"`, Windows 10/11 `<supportedOS>` compatibility GUIDs, UTF-8 codepage) and PE `VS_VERSION_INFO` version metadata.
+- **macOS**: Release binaries are signed with an ad-hoc Mach-O signature (`codesign --verify`). If downloaded via a web browser that attaches the `com.apple.quarantine` attribute, clear it after extracting:
+  ```bash
+  xattr -d com.apple.quarantine ./rustrix
+  ```
+
+### Option 2: Build from Source with Cargo
+
+Requires a standard Rust toolchain (`cargo` and `rustc` >= 1.80). No C compiler or native system libraries are required.
 
 ```bash
+# Build optimized release binary
 cargo build --release
-```
 
-The compiled binary will be located at `./target/release/rustrix`.
+# The compiled binary will be located at:
+./target/release/rustrix --version
+```
 
 Run the test suite:
 
@@ -61,7 +96,7 @@ cargo test
 Pass one or more JSON files to launch the interactive TUI:
 
 ```bash
-cargo run --release -- examples/users.json examples/orders.ndjson examples/nested_catalog.json
+rustrix examples/users.json examples/orders.ndjson examples/nested_catalog.json
 ```
 
 Each file's stem becomes its SQL table name:
@@ -127,6 +162,47 @@ rustrix -q "SELECT organization, cluster.primary_region AS region, UNNEST(featur
 
 ---
 
+### 3. Rust Library Usage
+
+`rustrix` can also be embedded as a library in Rust applications:
+
+```rust
+use rustrix::engine::QueryEngine;
+use rustrix::loader::{load_json_file, parse_file_spec};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut engine = QueryEngine::new();
+    let (table_name, path) = parse_file_spec("examples/users.json");
+    let table = load_json_file(&table_name, &path, None, false)?;
+    engine.register_table(table);
+
+    let result = engine.execute(
+        "SELECT department, COUNT(*) AS headcount, AVG(salary) AS avg_salary \
+         FROM users WHERE active = true GROUP BY department ORDER BY headcount DESC",
+    )?;
+
+    for row in &result.rows {
+        println!("{:?}", row);
+    }
+    Ok(())
+}
+```
+
+---
+
+## Security & Memory Safety
+
+See [SECURITY.md](SECURITY.md) for the complete security architecture:
+
+- **100% Safe Rust**: Enforced via `#![forbid(unsafe_code)]` in both `src/lib.rs` and `src/main.rs` with zero C/C++ FFI dependencies.
+- **Zero Memory Leaks**: Audited with `valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1` in CI across SQL queries, multi-table joins, unnesting, and caching.
+- **Strictly Read-Only Source Data**: Input JSON files are opened read-only and never modified. Data-mutating SQL statements (`INSERT`, `UPDATE`, `DELETE`, `DROP`) are rejected.
+- **Hardened Disk Cache**: Cache directories are created with `0700` owner-only permissions (`0600` on cache files), reject symbolic links, write atomically via temporary files, verify canonical paths, and automatically prune beyond 64 cached datasets.
+- **Terminal Escape Injection Protection**: Control characters and ANSI escape sequences (`\x1b`) inside untrusted JSON strings are sanitized before terminal table rendering.
+- **Overflow & DoS Protection**: Checked integer arithmetic with `f64` overflow promotion, bounded intermediate join/unnest row limits (`5,000,000` rows), bounded JSON recursion depth (`64` levels), and RAII terminal raw-mode recovery on exit or panic.
+
+---
+
 ## Supported JSON Shapes & Known Limitations
 
 ### Supported JSON Shapes
@@ -155,6 +231,11 @@ All direct and transitive dependencies in `Cargo.lock` are 100% pure Rust (no `-
 | `sqlparser` | Pure-Rust ANSI/Generic SQL AST parser | `Apache-2.0` |
 | `thiserror` | Structured error definitions | `MIT OR Apache-2.0` |
 | `tempfile` (dev) | Temporary directories in tests | `MIT OR Apache-2.0` |
+
+## Contributing & Changelog
+
+- Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
+- See [CHANGELOG.md](CHANGELOG.md) for release notes and version history.
 
 ## License
 

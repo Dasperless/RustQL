@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::io;
 use std::time::Duration;
 
-use crate::cli::value_to_display_string;
+use crate::cli::{sanitize_terminal_text, value_to_display_string};
 use crate::engine::{compare_json_values, QueryEngine, QueryResult};
 use crate::sql_helper::{
     build_cell_quick_actions, build_sql_templates, collect_field_sample_values,
@@ -296,8 +296,11 @@ impl TuiApp {
 
         self.sql_validation = validate_sql_live(&query, &self.engine);
 
-        // Record in history if distinct from last entry
+        // Record in history if distinct from last entry (capped at 500 entries to bound memory)
         if self.query_history.last().map(|s| s.as_str()) != Some(query.as_str()) {
+            if self.query_history.len() >= 500 {
+                self.query_history.remove(0);
+            }
             self.query_history.push(query.clone());
         }
         self.history_index = None;
@@ -580,25 +583,23 @@ impl TuiApp {
                 let approx_max = count_wrapped_lines(&lines, 40);
                 self.detail_scroll_offset = approx_max;
             }
-            KeyCode::Right | KeyCode::Char('l') => {
-                if col_count > 0 && self.selected_col + 1 < col_count {
-                    self.selected_col += 1;
-                    if self.selected_col >= self.col_scroll_offset + 6 {
-                        self.col_scroll_offset = self.selected_col.saturating_sub(5);
-                    }
-                    self.detail_cursor_line = 0;
-                    self.detail_scroll_offset = 0;
+            KeyCode::Right | KeyCode::Char('l')
+                if col_count > 0 && self.selected_col + 1 < col_count =>
+            {
+                self.selected_col += 1;
+                if self.selected_col >= self.col_scroll_offset + 6 {
+                    self.col_scroll_offset = self.selected_col.saturating_sub(5);
                 }
+                self.detail_cursor_line = 0;
+                self.detail_scroll_offset = 0;
             }
-            KeyCode::Left | KeyCode::Char('h') => {
-                if self.selected_col > 0 {
-                    self.selected_col -= 1;
-                    if self.selected_col < self.col_scroll_offset {
-                        self.col_scroll_offset = self.selected_col;
-                    }
-                    self.detail_cursor_line = 0;
-                    self.detail_scroll_offset = 0;
+            KeyCode::Left | KeyCode::Char('h') if self.selected_col > 0 => {
+                self.selected_col -= 1;
+                if self.selected_col < self.col_scroll_offset {
+                    self.col_scroll_offset = self.selected_col;
                 }
+                self.detail_cursor_line = 0;
+                self.detail_scroll_offset = 0;
             }
             _ => {}
         }
@@ -637,7 +638,8 @@ impl TuiApp {
                     if header_idx < cursor {
                         self.detail_cursor_line = header_idx;
                     } else {
-                        self.detail_cursor_line = self.detail_cursor_line.min(new_entries.len() - 1);
+                        self.detail_cursor_line =
+                            self.detail_cursor_line.min(new_entries.len() - 1);
                     }
                 } else {
                     self.detail_cursor_line = self.detail_cursor_line.min(new_entries.len() - 1);
@@ -704,8 +706,7 @@ impl TuiApp {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if count > 0 {
-                    self.quick_filter_selected =
-                        (self.quick_filter_selected + count - 1) % count;
+                    self.quick_filter_selected = (self.quick_filter_selected + count - 1) % count;
                 }
             }
             KeyCode::Enter => {
@@ -1226,7 +1227,9 @@ pub fn draw_tui(frame: &mut Frame, app: &mut TuiApp) {
 fn draw_schema_sidebar(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let focused = app.focus == FocusPane::SchemaBrowser;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -1281,12 +1284,10 @@ fn draw_top_bars(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let title_line = match app.history_index {
         Some(idx) => Line::from(vec![
             Span::styled(
-                format!(
-                    " SQL [History {}/{}] ",
-                    idx + 1,
-                    app.query_history.len()
-                ),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                format!(" SQL [History {}/{}] ", idx + 1, app.query_history.len()),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("│ {} ", validation_badge),
@@ -1296,7 +1297,9 @@ fn draw_top_bars(frame: &mut Frame, app: &TuiApp, area: Rect) {
         None => Line::from(vec![
             Span::styled(
                 " SQL (Enter:Run  Tab:Complete  Ctrl+T:Templates) ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("│ {} ", validation_badge),
@@ -1340,7 +1343,9 @@ fn draw_top_bars(frame: &mut Frame, app: &TuiApp, area: Rect) {
     // 2. Quick Filter Input box
     let filter_focused = app.focus == FocusPane::FilterInput;
     let filter_border = if filter_focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -1380,7 +1385,8 @@ fn draw_sql_autocomplete_popup(frame: &mut Frame, app: &TuiApp, top_bar_area: Re
     let popup_height = (max_items as u16) + 2;
     let popup_width = top_bar_area.width.clamp(40, 78);
     let popup_x = top_bar_area.x;
-    let popup_y = (top_bar_area.y + top_bar_area.height).min(frame.area().height.saturating_sub(popup_height));
+    let popup_y = (top_bar_area.y + top_bar_area.height)
+        .min(frame.area().height.saturating_sub(popup_height));
     let popup_area = Rect::new(popup_x, popup_y, popup_width, popup_height);
 
     let items: Vec<ListItem> = app
@@ -1407,10 +1413,7 @@ fn draw_sql_autocomplete_popup(frame: &mut Frame, app: &TuiApp, top_bar_area: Re
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    sug.description.clone(),
-                    Style::default().fg(Color::Gray),
-                ),
+                Span::styled(sug.description.clone(), Style::default().fg(Color::Gray)),
             ]);
             ListItem::new(line)
         })
@@ -1440,7 +1443,9 @@ fn draw_error_banner(frame: &mut Frame, app: &TuiApp, area: Rect) {
     let msg = app.error_message.as_deref().unwrap_or("");
     let err_para = Paragraph::new(Span::styled(
         format!(" ⚠ {}", msg),
-        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD),
     ))
     .block(
         Block::default()
@@ -1454,7 +1459,9 @@ fn draw_error_banner(frame: &mut Frame, app: &TuiApp, area: Rect) {
 fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     let focused = app.focus == FocusPane::ResultTable;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -1462,13 +1469,12 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     let res = match &app.current_result {
         Some(r) if !r.columns.is_empty() => r,
         _ => {
-            let empty_para = Paragraph::new("No rows or columns to display.")
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(border_style)
-                        .title(" Results "),
-                );
+            let empty_para = Paragraph::new("No rows or columns to display.").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .title(" Results "),
+            );
             frame.render_widget(empty_para, area);
             return;
         }
@@ -1478,26 +1484,29 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     let start_col = app.col_scroll_offset.min(total_cols.saturating_sub(1));
     let visible_cols_slice = &res.columns[start_col..];
 
-    let header_cells = visible_cols_slice.iter().enumerate().map(|(offset, col_name)| {
-        let actual_col = start_col + offset;
-        let sort_indicator = match app.sort_state {
-            Some((sc, SortDir::Asc)) if sc == actual_col => " ▲",
-            Some((sc, SortDir::Desc)) if sc == actual_col => " ▼",
-            _ => "",
-        };
-        let is_selected_col = actual_col == app.selected_col;
-        let style = if is_selected_col {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        };
-        Cell::from(format!("{}{}", col_name, sort_indicator)).style(style)
-    });
+    let header_cells = visible_cols_slice
+        .iter()
+        .enumerate()
+        .map(|(offset, col_name)| {
+            let actual_col = start_col + offset;
+            let sort_indicator = match app.sort_state {
+                Some((sc, SortDir::Asc)) if sc == actual_col => " ▲",
+                Some((sc, SortDir::Desc)) if sc == actual_col => " ▼",
+                _ => "",
+            };
+            let is_selected_col = actual_col == app.selected_col;
+            let style = if is_selected_col {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            };
+            Cell::from(format!("{}{}", col_name, sort_indicator)).style(style)
+        });
 
     let header = Row::new(header_cells).height(1).bottom_margin(1);
 
@@ -1619,7 +1628,8 @@ impl io::Write for BoundedWriter {
     }
 }
 
-/// Format a cell value for the TUI table, capping serialization of large nested objects/arrays at 64 bytes.
+/// Format a cell value for the TUI table, capping serialization of large nested objects/arrays at 64 bytes
+/// and sanitizing control characters for safe terminal display.
 fn value_to_table_cell_string(val: &Value) -> String {
     match val {
         Value::Array(_) | Value::Object(_) => {
@@ -1636,12 +1646,17 @@ fn value_to_table_cell_string(val: &Value) -> String {
             if truncated {
                 s.push('…');
             }
-            s
+            sanitize_terminal_text(&s)
         }
-        Value::String(s) if s.len() > 64 => {
-            let mut out: String = s.chars().take(60).collect();
-            out.push('…');
-            out
+        Value::String(s) => {
+            let safe = sanitize_terminal_text(s);
+            if safe.len() > 64 {
+                let mut out: String = safe.chars().take(60).collect();
+                out.push('…');
+                out
+            } else {
+                safe
+            }
         }
         _ => value_to_display_string(val),
     }
@@ -1649,15 +1664,25 @@ fn value_to_table_cell_string(val: &Value) -> String {
 
 /// Fast recursive case-insensitive filter match that avoids serializing nested JSON objects to strings.
 fn value_matches_filter(val: &Value, needle_lower: &str) -> bool {
+    value_matches_filter_bounded(val, needle_lower, 0)
+}
+
+fn value_matches_filter_bounded(val: &Value, needle_lower: &str, depth: usize) -> bool {
+    if depth >= 64 {
+        return false;
+    }
     match val {
         Value::Null => "null".contains(needle_lower),
         Value::Bool(true) => "true".contains(needle_lower),
         Value::Bool(false) => "false".contains(needle_lower),
         Value::Number(n) => n.to_string().contains(needle_lower),
         Value::String(s) => str_contains_ignore_case(s, needle_lower),
-        Value::Array(arr) => arr.iter().any(|el| value_matches_filter(el, needle_lower)),
+        Value::Array(arr) => arr
+            .iter()
+            .any(|el| value_matches_filter_bounded(el, needle_lower, depth + 1)),
         Value::Object(map) => map.iter().any(|(k, v)| {
-            str_contains_ignore_case(k, needle_lower) || value_matches_filter(v, needle_lower)
+            str_contains_ignore_case(k, needle_lower)
+                || value_matches_filter_bounded(v, needle_lower, depth + 1)
         }),
     }
 }
@@ -1861,12 +1886,8 @@ fn draw_template_modal(frame: &mut Frame, app: &TuiApp) {
     frame.render_stateful_widget(list, chunks[0], &mut state);
 
     if let Some(selected_tpl) = app.sql_templates.get(app.template_selected) {
-        let sql_line = highlight_sql_line(
-            &selected_tpl.sql,
-            selected_tpl.sql.len(),
-            None,
-            &app.engine,
-        );
+        let sql_line =
+            highlight_sql_line(&selected_tpl.sql, selected_tpl.sql.len(), None, &app.engine);
         let exp_line = Line::from(vec![
             Span::styled(" 💡 ", Style::default().fg(Color::Yellow)),
             Span::styled(
@@ -2011,8 +2032,7 @@ pub fn highlight_json_line_spans(line: &str, extra_modifier: Modifier) -> Vec<Sp
             let start = i;
             i += 1;
             while i < n
-                && (chars[i].is_ascii_digit()
-                    || matches!(chars[i], '.' | 'e' | 'E' | '+' | '-'))
+                && (chars[i].is_ascii_digit() || matches!(chars[i], '.' | 'e' | 'E' | '+' | '-'))
             {
                 i += 1;
             }
@@ -2094,6 +2114,9 @@ fn is_collapsible_json_container(val: &Value) -> bool {
     }
 }
 
+/// Maximum recursion depth for rendering collapsible JSON nodes in the Detail Inspector.
+const MAX_JSON_RENDER_DEPTH: usize = 64;
+
 #[allow(clippy::too_many_arguments)]
 fn push_collapsible_json_value(
     out: &mut Vec<DetailModalEntry>,
@@ -2105,7 +2128,7 @@ fn push_collapsible_json_value(
     collapsed_paths: &BTreeSet<String>,
     enclosing_nested_path: Option<&str>,
 ) {
-    let indent = "  ".repeat(indent_depth);
+    let indent = "  ".repeat(indent_depth.min(MAX_JSON_RENDER_DEPTH));
     let comma = if trailing_comma { "," } else { "" };
     let key_part = match key_prefix {
         Some(k) => {
@@ -2114,6 +2137,20 @@ fn push_collapsible_json_value(
         }
         None => String::new(),
     };
+
+    if indent_depth >= MAX_JSON_RENDER_DEPTH {
+        let text = format!(
+            "{}  {}{}\"<max depth reached>\"{}",
+            indent, key_part, "", comma
+        );
+        out.push(DetailModalEntry {
+            line: Line::from(highlight_json_line_spans(&text, Modifier::empty())),
+            toggle_path: enclosing_nested_path.map(str::to_string),
+            snap_to_path: enclosing_nested_path.map(str::to_string),
+            is_node_header: false,
+        });
+        return;
+    }
 
     match val {
         Value::Object(map) => {
@@ -2128,7 +2165,10 @@ fn push_collapsible_json_value(
             } else if collapsed_paths.contains(path) {
                 let count = map.len();
                 let noun = if count == 1 { "field" } else { "fields" };
-                let text = format!("{}▸ {}{{ … {} {} }}{}", indent, key_part, count, noun, comma);
+                let text = format!(
+                    "{}▸ {}{{ … {} {} }}{}",
+                    indent, key_part, count, noun, comma
+                );
                 out.push(DetailModalEntry {
                     line: Line::from(highlight_json_line_spans(&text, Modifier::empty())),
                     toggle_path: Some(path.to_string()),
@@ -2244,6 +2284,9 @@ fn collect_json_collapsible_paths_recursive(
     field_paths: &mut Vec<String>,
     all_paths: &mut Vec<String>,
 ) {
+    if depth >= MAX_JSON_RENDER_DEPTH {
+        return;
+    }
     match val {
         Value::Object(map) if !map.is_empty() => {
             all_paths.push(path.to_string());
@@ -2431,7 +2474,7 @@ pub fn build_detail_modal_entries(app: &TuiApp) -> Vec<DetailModalEntry> {
                 for raw_line in s.lines() {
                     entries.push(DetailModalEntry {
                         line: Line::from(Span::styled(
-                            raw_line.to_string(),
+                            sanitize_terminal_text(raw_line),
                             Style::default().fg(Color::LightGreen),
                         )),
                         toggle_path: None,
@@ -2535,11 +2578,7 @@ pub fn build_detail_modal_lines(app: &TuiApp) -> Vec<Line<'static>> {
 /// Compute the visual wrapped height of a single [`Line`] at `wrap_width`.
 fn line_wrapped_height(line: &Line<'_>, wrap_width: u16) -> usize {
     let width = (wrap_width as usize).max(1);
-    let char_len: usize = line
-        .spans
-        .iter()
-        .map(|s| s.content.chars().count())
-        .sum();
+    let char_len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
     if char_len == 0 {
         1
     } else {
@@ -2642,7 +2681,11 @@ fn draw_detail_modal(frame: &mut Frame, app: &mut TuiApp) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(title);
     let para = Paragraph::new(lines)
         .block(block)
@@ -2683,7 +2726,11 @@ Keyboard Shortcuts & Guided SQL Assistant:
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(" Rustrix Help (Press Esc, Enter, or ? to close) ");
     let para = Paragraph::new(help_text).block(block);
     frame.render_widget(para, area);
@@ -2709,21 +2756,38 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// RAII guard that ensures raw mode and alternate screen are always exited cleanly,
+/// even if an error or unexpected panic occurs during the TUI event loop.
+struct TerminalRestoreGuard;
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    }
+}
+
 /// Launch the interactive TUI in the user's terminal.
 pub fn run_tui(engine: QueryEngine) -> Result<(), Box<dyn std::error::Error>> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        default_hook(panic_info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    let _restore_guard = TerminalRestoreGuard;
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = TuiApp::new(engine);
     let res = run_event_loop(&mut terminal, &mut app);
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-
     res?;
     Ok(())
 }
@@ -2971,14 +3035,13 @@ mod tests {
                 })
             })
             .collect();
-        obj.insert(
-            "payload".to_string(),
-            serde_json::Value::Array(large_items),
-        );
+        obj.insert("payload".to_string(), serde_json::Value::Array(large_items));
         // Embedded JSON string cell
         obj.insert(
             "embedded".to_string(),
-            serde_json::Value::from("{\"nested_key\": \"nested_val\", \"count\": 42, \"ok\": true}"),
+            serde_json::Value::from(
+                "{\"nested_key\": \"nested_val\", \"count\": 42, \"ok\": true}",
+            ),
         );
         // Very long single-line string cell that requires soft-wrap height calculation
         obj.insert(
@@ -3102,25 +3165,37 @@ mod tests {
         let lines_to_strings = |app: &TuiApp| -> Vec<String> {
             build_detail_modal_lines(app)
                 .into_iter()
-                .map(|l| l.spans.into_iter().map(|s| s.content.into_owned()).collect())
+                .map(|l| {
+                    l.spans
+                        .into_iter()
+                        .map(|s| s.content.into_owned())
+                        .collect()
+                })
                 .collect()
         };
 
         let initial_lines = lines_to_strings(&app);
         assert!(initial_lines.iter().any(|l| l.contains("▾ \"address\": {")));
         assert!(initial_lines.iter().any(|l| l.contains("▾ \"tags\": [")));
-        assert!(initial_lines.iter().any(|l| l.contains("\"city\": \"Seattle\"")));
+        assert!(initial_lines
+            .iter()
+            .any(|l| l.contains("\"city\": \"Seattle\"")));
 
         // 1. Move cursor to line 1 (`▾ {` of Selected Cell [address]) and press Space to collapse it
         app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert_eq!(app.detail_cursor_line, 1);
         app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         let after_cell_collapse = lines_to_strings(&app);
-        assert!(after_cell_collapse.iter().any(|l| l.contains("▸ { … 3 fields }")));
+        assert!(after_cell_collapse
+            .iter()
+            .any(|l| l.contains("▸ { … 3 fields }")));
 
         // Press Enter to expand Selected Cell [address] back
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.show_detail_modal, "Enter inside inspector toggles fold rather than closing");
+        assert!(
+            app.show_detail_modal,
+            "Enter inside inspector toggles fold rather than closing"
+        );
         assert!(app.detail_collapsed_paths.is_empty());
 
         // 2. Navigate down to `"address": {` inside Full Row JSON and collapse it

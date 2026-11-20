@@ -36,7 +36,7 @@ pub struct CliArgs {
     pub query: Option<String>,
 
     /// Output format when running in non-interactive (`-q`) mode.
-    #[arg(short = 'f', long = "format", value_enum, default_value_t = OutputFormat::Table)]
+    #[arg(short = 'f', long = "format", value_enum, default_value = "table")]
     pub format: OutputFormat,
 
     /// Optional custom cache directory for normalized NDJSON cache files.
@@ -44,7 +44,7 @@ pub struct CliArgs {
     pub cache_dir: Option<PathBuf>,
 
     /// Disable on-disk caching (keep everything in-memory only).
-    #[arg(long = "no-cache", default_value_t = false)]
+    #[arg(long = "no-cache")]
     pub no_cache: bool,
 }
 
@@ -84,18 +84,44 @@ pub fn value_to_display_string(val: &Value) -> String {
     }
 }
 
+/// Sanitize a string for safe single-line terminal rendering by stripping/replacing
+/// ANSI escape codes and C0/C1 control characters.
+pub fn sanitize_terminal_text(s: &str) -> String {
+    if !s.chars().any(|c| c.is_control()) {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' | '\r' | '\t' => out.push(' '),
+            '\x1b' => out.push_str("\\x1b"),
+            c if c.is_control() => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn format_as_table(result: &QueryResult) -> String {
     if result.columns.is_empty() {
         return "(empty result set)\n".to_string();
     }
 
-    let mut widths: Vec<usize> = result.columns.iter().map(|c| c.chars().count()).collect();
+    let safe_cols: Vec<String> = result
+        .columns
+        .iter()
+        .map(|c| sanitize_terminal_text(c))
+        .collect();
+    let mut widths: Vec<usize> = safe_cols.iter().map(|c| c.chars().count()).collect();
     let mut rendered_rows: Vec<Vec<String>> = Vec::with_capacity(result.rows.len());
 
     for row in &result.rows {
-        let mut rendered_row = Vec::with_capacity(result.columns.len());
+        let mut rendered_row = Vec::with_capacity(safe_cols.len());
         for (i, val) in row.iter().enumerate() {
-            let s = value_to_display_string(val);
+            let s = sanitize_terminal_text(&value_to_display_string(val));
             let len = s.chars().count();
             if i < widths.len() && len > widths[i] {
                 widths[i] = len;
@@ -117,7 +143,7 @@ fn format_as_table(result: &QueryResult) -> String {
 
     // Header
     out.push('|');
-    for (i, col) in result.columns.iter().enumerate() {
+    for (i, col) in safe_cols.iter().enumerate() {
         let pad = widths[i].saturating_sub(col.chars().count());
         out.push(' ');
         out.push_str(col);

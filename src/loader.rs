@@ -102,14 +102,14 @@ pub fn parse_file_spec(spec: &str) -> (String, PathBuf) {
     if let Some((alias, path_str)) = spec.split_once('=') {
         let candidate_path = Path::new(path_str);
         if !alias.trim().is_empty() && (candidate_path.exists() || !Path::new(spec).exists()) {
-            return (sanitize_table_name(alias.trim()), candidate_path.to_path_buf());
+            return (
+                sanitize_table_name(alias.trim()),
+                candidate_path.to_path_buf(),
+            );
         }
     }
     let path = PathBuf::from(spec);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("table");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("table");
     (sanitize_table_name(stem), path)
 }
 
@@ -148,8 +148,7 @@ pub fn detect_shape_from_str(content: &str, path_label: &str) -> Result<JsonShap
     match first_char {
         '[' => {
             // Verify it's a valid JSON array (or possibly NDJSON of arrays)
-            let mut stream =
-                serde_json::Deserializer::from_str(trimmed).into_iter::<Value>();
+            let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<Value>();
             let first = stream.next().ok_or_else(|| LoaderError::UnsupportedShape {
                 path: path_label.to_string(),
                 reason: "Empty input".to_string(),
@@ -180,8 +179,7 @@ pub fn detect_shape_from_str(content: &str, path_label: &str) -> Result<JsonShap
         '{' => {
             // Check whether it is NDJSON (multiple top-level JSON objects separated by newlines)
             // or a single top-level JSON object.
-            let mut stream =
-                serde_json::Deserializer::from_str(trimmed).into_iter::<Value>();
+            let mut stream = serde_json::Deserializer::from_str(trimmed).into_iter::<Value>();
             let first = stream
                 .next()
                 .ok_or_else(|| LoaderError::UnsupportedShape {
@@ -359,7 +357,52 @@ fn stream_parse_top_level_array<R: BufRead>(
     Ok(rows)
 }
 
-/// Stream-parse an NDJSON / JSON Lines reader line-by-line reusing a single buffer.
+/// Maximum supported input file size (2 GiB) to prevent out-of-memory denial of service.
+const MAX_INPUT_FILE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Maximum bytes allowed for a single NDJSON line (128 MiB) to prevent unbounded buffer growth.
+const MAX_NDJSON_LINE_BYTES: usize = 128 * 1024 * 1024;
+
+/// Maximum number of cached dataset pairs (`.meta.json` + `.ndjson`) retained in the cache directory.
+const MAX_CACHE_ENTRIES: usize = 64;
+
+/// Read a single line from `reader` into `buf`, enforcing `max_bytes` per line.
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut String,
+    max_bytes: usize,
+) -> std::io::Result<usize> {
+    let mut total_read = 0usize;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(total_read);
+        }
+        let (consume_len, found_newline) = match available.iter().position(|&b| b == b'\n') {
+            Some(pos) => (pos + 1, true),
+            None => (available.len(), false),
+        };
+        if total_read.saturating_add(consume_len) > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Single line exceeds maximum allowed length of {} bytes",
+                    max_bytes
+                ),
+            ));
+        }
+        let chunk_str = std::str::from_utf8(&available[..consume_len])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        buf.push_str(chunk_str);
+        reader.consume(consume_len);
+        total_read += consume_len;
+        if found_newline {
+            return Ok(total_read);
+        }
+    }
+}
+
+/// Stream-parse an NDJSON / JSON Lines reader line-by-line reusing a single bounded buffer.
 fn stream_parse_ndjson<R: BufRead>(
     mut reader: R,
     path_label: &str,
@@ -369,9 +412,11 @@ fn stream_parse_ndjson<R: BufRead>(
     let mut idx = 0usize;
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).map_err(|e| LoaderError::Io {
-            path: path_label.to_string(),
-            source: e,
+        let n = read_bounded_line(&mut reader, &mut line, MAX_NDJSON_LINE_BYTES).map_err(|e| {
+            LoaderError::Io {
+                path: path_label.to_string(),
+                source: e,
+            }
         })?;
         if n == 0 {
             break;
@@ -386,6 +431,11 @@ fn stream_parse_ndjson<R: BufRead>(
             message: format!("Line {}: {}", idx, e),
         })?;
         rows.push(value_to_row_map(val));
+        // Reclaim memory if a single unusually large line expanded the reusable buffer beyond 1 MiB
+        if line.capacity() > 1_048_576 {
+            line.clear();
+            line.shrink_to(4096);
+        }
     }
     Ok(rows)
 }
@@ -404,6 +454,15 @@ pub fn load_json_file(
         source: e,
     })?;
     let file_size = meta.len();
+    if file_size > MAX_INPUT_FILE_BYTES {
+        return Err(LoaderError::UnsupportedShape {
+            path: path_label,
+            reason: format!(
+                "File size ({} bytes) exceeds maximum supported in-memory limit ({} bytes)",
+                file_size, MAX_INPUT_FILE_BYTES
+            ),
+        });
+    }
     let modified_nanos = meta
         .modified()
         .ok()
@@ -487,10 +546,11 @@ pub fn load_json_file(
             let mut first_line = String::new();
             loop {
                 first_line.clear();
-                let n = reader.read_line(&mut first_line).map_err(|e| LoaderError::Io {
-                    path: path_label.clone(),
-                    source: e,
-                })?;
+                let n = read_bounded_line(&mut reader, &mut first_line, MAX_NDJSON_LINE_BYTES)
+                    .map_err(|e| LoaderError::Io {
+                        path: path_label.clone(),
+                        source: e,
+                    })?;
                 if n == 0 || !first_line.trim().is_empty() {
                     break;
                 }
@@ -500,8 +560,7 @@ pub fn load_json_file(
             let mut second_line = String::new();
             loop {
                 second_line.clear();
-                let n = reader
-                    .read_line(&mut second_line)
+                let n = read_bounded_line(&mut reader, &mut second_line, MAX_NDJSON_LINE_BYTES)
                     .map_err(|e| LoaderError::Io {
                         path: path_label.clone(),
                         source: e,
@@ -600,8 +659,7 @@ pub fn parse_json_str(
             }
         }
         JsonShape::Ndjson => {
-            let stream =
-                serde_json::Deserializer::from_str(content.trim()).into_iter::<Value>();
+            let stream = serde_json::Deserializer::from_str(content.trim()).into_iter::<Value>();
             let mut rows = Vec::new();
             for item in stream {
                 let val = item.map_err(|e| LoaderError::JsonParse {
@@ -631,10 +689,7 @@ fn extract_from_single_object(
         if let Some(key) = find_best_nested_array_key(&map) {
             if let Some(Value::Array(arr)) = map.remove(&key) {
                 let rows = arr.into_iter().map(value_to_row_map).collect();
-                return Ok((
-                    JsonShape::NestedObjectArray { extracted_key: key },
-                    rows,
-                ));
+                return Ok((JsonShape::NestedObjectArray { extracted_key: key }, rows));
             }
         }
         Ok((JsonShape::SingleObject, vec![map]))
@@ -647,9 +702,7 @@ fn extract_from_single_object(
 }
 
 /// Infer ordered top-level columns and recursive dot-path schema fields from a list of rows.
-pub fn infer_columns_and_schema(
-    rows: &[Map<String, Value>],
-) -> (Vec<String>, Vec<SchemaField>) {
+pub fn infer_columns_and_schema(rows: &[Map<String, Value>]) -> (Vec<String>, Vec<SchemaField>) {
     let mut columns: Vec<String> = Vec::new();
     // Sample up to 200 rows for schema discovery
     let sample_limit = rows.len().min(200);
@@ -661,16 +714,17 @@ pub fn infer_columns_and_schema(
         }
     }
 
+    let row_refs: Vec<&Map<String, Value>> = rows.iter().take(100).collect();
     let mut schema_fields = Vec::new();
     for col in &columns {
-        collect_schema_for_key(rows, col, col, 0, &mut schema_fields);
+        collect_schema_for_key(&row_refs, col, col, 0, &mut schema_fields);
     }
 
     (columns, schema_fields)
 }
 
 fn collect_schema_for_key(
-    rows: &[Map<String, Value>],
+    rows: &[&Map<String, Value>],
     top_or_sub_key: &str,
     full_path: &str,
     depth: usize,
@@ -700,10 +754,7 @@ fn collect_schema_for_key(
         }
         Some(Value::String(_)) => "String".to_string(),
         Some(Value::Array(arr)) => {
-            let elem_type = arr
-                .first()
-                .map(simple_value_type)
-                .unwrap_or("Any");
+            let elem_type = arr.first().map(simple_value_type).unwrap_or("Any");
             format!("Array<{}>", elem_type)
         }
         Some(Value::Object(_)) => "Object".to_string(),
@@ -715,12 +766,12 @@ fn collect_schema_for_key(
         depth,
     });
 
-    // If it's a nested object, recursively collect subfields up to depth 3
+    // If it's a nested object, recursively collect subfields up to depth 3 without cloning maps
     if depth < 3 {
-        let mut sub_rows: Vec<Map<String, Value>> = Vec::new();
+        let mut sub_rows: Vec<&Map<String, Value>> = Vec::new();
         for row in &rows[..sample_limit] {
             if let Some(Value::Object(sub_map)) = row.get(top_or_sub_key) {
-                sub_rows.push(sub_map.clone());
+                sub_rows.push(sub_map);
             }
         }
         if !sub_rows.is_empty() {
@@ -767,13 +818,27 @@ fn default_cache_dir() -> PathBuf {
     std::env::temp_dir().join("rustrix_cache")
 }
 
+fn canonical_path_string(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
 fn cache_key_for(path: &Path, file_size: u64, modified_nanos: u128) -> String {
-    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical = canonical_path_string(path);
     let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
+    canonical.hash(&mut hasher);
     file_size.hash(&mut hasher);
     modified_nanos.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    format!("{:016x}_{:x}", hasher.finish(), file_size)
+}
+
+/// Check if a filesystem path exists and is a symbolic link.
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 fn try_load_from_cache(
@@ -783,17 +848,29 @@ fn try_load_from_cache(
     modified_nanos: u128,
     path_label: &str,
 ) -> Option<(JsonShape, Vec<Map<String, Value>>)> {
+    if is_symlink(cache_dir) {
+        return None;
+    }
     let key = cache_key_for(source_path, file_size, modified_nanos);
     let meta_path = cache_dir.join(format!("{}.meta.json", key));
     let data_path = cache_dir.join(format!("{}.ndjson", key));
 
-    if !meta_path.exists() || !data_path.exists() {
+    if !meta_path.exists()
+        || !data_path.exists()
+        || is_symlink(&meta_path)
+        || is_symlink(&data_path)
+    {
         return None;
     }
 
     let meta_bytes = fs::read(&meta_path).ok()?;
     let meta: CacheMetadata = serde_json::from_slice(&meta_bytes).ok()?;
-    if meta.file_size != file_size || meta.modified_nanos != modified_nanos {
+    let expected_source = canonical_path_string(source_path);
+    if meta.file_size != file_size
+        || meta.modified_nanos != modified_nanos
+        || (meta.source_path != expected_source
+            && meta.source_path != source_path.to_string_lossy())
+    {
         return None;
     }
 
@@ -807,6 +884,24 @@ fn try_load_from_cache(
     Some((meta.shape, rows))
 }
 
+/// Create a file with owner-only (`0o600` on Unix) permissions, refusing symlinks.
+fn create_private_file(path: &Path) -> std::io::Result<File> {
+    if is_symlink(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Refusing to write to symbolic link in cache directory",
+        ));
+    }
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
 fn write_to_cache(
     cache_dir: &Path,
     source_path: &Path,
@@ -815,29 +910,101 @@ fn write_to_cache(
     shape: &JsonShape,
     rows: &[Map<String, Value>],
 ) -> std::io::Result<()> {
+    if cache_dir.exists() && is_symlink(cache_dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Refusing to use symbolic link as cache directory",
+        ));
+    }
     fs::create_dir_all(cache_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(cache_dir, fs::Permissions::from_mode(0o700));
+    }
+
     let key = cache_key_for(source_path, file_size, modified_nanos);
     let meta_path = cache_dir.join(format!("{}.meta.json", key));
     let data_path = cache_dir.join(format!("{}.ndjson", key));
 
-    let data_file = File::create(&data_path)?;
+    if is_symlink(&meta_path) || is_symlink(&data_path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Refusing to overwrite symbolic link in cache directory",
+        ));
+    }
+
+    let pid = std::process::id();
+    let tmp_data_path = cache_dir.join(format!(".{}.ndjson.tmp.{}", key, pid));
+    let tmp_meta_path = cache_dir.join(format!(".{}.meta.json.tmp.{}", key, pid));
+
+    let data_file = create_private_file(&tmp_data_path)?;
     let mut writer = BufWriter::with_capacity(64 * 1024, data_file);
     for row in rows {
         serde_json::to_writer(&mut writer, row)?;
         writer.write_all(b"\n")?;
     }
     writer.flush()?;
+    drop(writer);
+    fs::rename(&tmp_data_path, &data_path)?;
 
     let meta = CacheMetadata {
-        source_path: source_path.to_string_lossy().to_string(),
+        source_path: canonical_path_string(source_path),
         file_size,
         modified_nanos,
         shape: shape.clone(),
         row_count: rows.len(),
     };
     let meta_json = serde_json::to_vec(&meta)?;
-    fs::write(&meta_path, meta_json)?;
+    {
+        let mut meta_file = create_private_file(&tmp_meta_path)?;
+        meta_file.write_all(&meta_json)?;
+        meta_file.flush()?;
+    }
+    fs::rename(&tmp_meta_path, &meta_path)?;
+
+    prune_old_cache_entries(cache_dir);
     Ok(())
+}
+
+/// Bound disk usage in `cache_dir` by evicting the oldest cached dataset pairs when count exceeds `MAX_CACHE_ENTRIES`.
+fn prune_old_cache_entries(cache_dir: &Path) {
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    let mut meta_files: Vec<(PathBuf, u128)> = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+            if name.ends_with(".meta.json") && !name.starts_with('.') {
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                meta_files.push((p, mtime));
+            }
+        }
+    }
+    if meta_files.len() <= MAX_CACHE_ENTRIES {
+        return;
+    }
+    meta_files.sort_by_key(|(_, mtime)| *mtime);
+    let to_remove = meta_files.len() - MAX_CACHE_ENTRIES;
+    for (meta_path, _) in meta_files.into_iter().take(to_remove) {
+        if let Some(stem) = meta_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .and_then(|s| s.strip_suffix(".meta.json"))
+        {
+            let data_path = cache_dir.join(format!("{}.ndjson", stem));
+            let _ = fs::remove_file(&meta_path);
+            let _ = fs::remove_file(&data_path);
+        }
+    }
 }
 
 #[cfg(test)]

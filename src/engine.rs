@@ -212,7 +212,12 @@ impl<'a> EvalRow<'a> {
         Self::from_owned_single(alias, cols, empty_map)
     }
 
-    fn insert_owned_table_front(&mut self, alias: &str, cols: Vec<String>, map: Map<String, Value>) {
+    fn insert_owned_table_front(
+        &mut self,
+        alias: &str,
+        cols: Vec<String>,
+        map: Map<String, Value>,
+    ) {
         self.tables
             .insert(Arc::from(alias), RowMap::Owned(Arc::new(map)));
         let mut order = (*self.table_order).clone();
@@ -490,10 +495,7 @@ impl QueryEngine {
             }
         };
         let has_aggregates = select_has_aggregates(select);
-        let is_distinct = matches!(
-            select.distinct,
-            Some(sqlparser::ast::Distinct::Distinct)
-        );
+        let is_distinct = matches!(select.distinct, Some(sqlparser::ast::Distinct::Distinct));
         let has_order_by = query.order_by.is_some();
         let has_inline_unnest = select_has_inline_unnest(select);
 
@@ -651,7 +653,16 @@ impl QueryEngine {
 
         Ok(current_rows.unwrap_or_default())
     }
+}
 
+/// Maximum number of intermediate working rows produced by a JOIN or UNNEST operation
+/// to prevent accidental cartesian-product out-of-memory crashes.
+const MAX_WORKING_ROWS: usize = 5_000_000;
+
+/// Maximum recursion depth when comparing or hashing deeply nested JSON values.
+const MAX_VALUE_RECURSION_DEPTH: usize = 64;
+
+impl QueryEngine {
     fn apply_table_factor<'a>(
         &'a self,
         existing: Option<Vec<EvalRow<'a>>>,
@@ -673,7 +684,14 @@ impl QueryEngine {
             None => Ok(factor_rows),
             Some(left_rows) => {
                 // Comma join (CROSS JOIN)
-                let mut combined = Vec::with_capacity(left_rows.len() * factor_rows.len());
+                let est = left_rows.len().saturating_mul(factor_rows.len());
+                if est > MAX_WORKING_ROWS {
+                    return Err(EngineError::Evaluation(format!(
+                        "CROSS JOIN would produce {} rows, exceeding maximum limit of {} rows",
+                        est, MAX_WORKING_ROWS
+                    )));
+                }
+                let mut combined = Vec::with_capacity(est.min(65_536));
                 for l in &left_rows {
                     for r in &factor_rows {
                         combined.push(l.merge(r));
@@ -765,7 +783,14 @@ impl QueryEngine {
 
         match join_op {
             JoinOperator::CrossJoin => {
-                let mut out = Vec::with_capacity(left_rows.len() * right_rows.len());
+                let est = left_rows.len().saturating_mul(right_rows.len());
+                if est > MAX_WORKING_ROWS {
+                    return Err(EngineError::Evaluation(format!(
+                        "CROSS JOIN would produce {} rows, exceeding maximum limit of {} rows",
+                        est, MAX_WORKING_ROWS
+                    )));
+                }
+                let mut out = Vec::with_capacity(est.min(65_536));
                 for l in &left_rows {
                     for r in &right_rows {
                         out.push(l.merge(r));
@@ -779,6 +804,12 @@ impl QueryEngine {
                     for r in &right_rows {
                         let merged = l.merge(r);
                         if eval_join_constraint(constraint, l, r, &merged)? {
+                            if out.len() >= MAX_WORKING_ROWS {
+                                return Err(EngineError::Evaluation(format!(
+                                    "JOIN result exceeded maximum working row limit ({} rows)",
+                                    MAX_WORKING_ROWS
+                                )));
+                            }
                             out.push(merged);
                         }
                     }
@@ -793,11 +824,23 @@ impl QueryEngine {
                     for r in &right_rows {
                         let merged = l.merge(r);
                         if eval_join_constraint(constraint, l, r, &merged)? {
+                            if out.len() >= MAX_WORKING_ROWS {
+                                return Err(EngineError::Evaluation(format!(
+                                    "LEFT JOIN result exceeded maximum working row limit ({} rows)",
+                                    MAX_WORKING_ROWS
+                                )));
+                            }
                             out.push(merged);
                             matched = true;
                         }
                     }
                     if !matched {
+                        if out.len() >= MAX_WORKING_ROWS {
+                            return Err(EngineError::Evaluation(format!(
+                                "LEFT JOIN result exceeded maximum working row limit ({} rows)",
+                                MAX_WORKING_ROWS
+                            )));
+                        }
                         out.push(l.merge(&null_right));
                     }
                 }
@@ -811,11 +854,23 @@ impl QueryEngine {
                     for l in &left_rows {
                         let merged = l.merge(r);
                         if eval_join_constraint(constraint, l, r, &merged)? {
+                            if out.len() >= MAX_WORKING_ROWS {
+                                return Err(EngineError::Evaluation(format!(
+                                    "RIGHT JOIN result exceeded maximum working row limit ({} rows)",
+                                    MAX_WORKING_ROWS
+                                )));
+                            }
                             out.push(merged);
                             matched = true;
                         }
                     }
                     if !matched {
+                        if out.len() >= MAX_WORKING_ROWS {
+                            return Err(EngineError::Evaluation(format!(
+                                "RIGHT JOIN result exceeded maximum working row limit ({} rows)",
+                                MAX_WORKING_ROWS
+                            )));
+                        }
                         out.push(null_left.merge(r));
                     }
                 }
@@ -832,17 +887,35 @@ impl QueryEngine {
                     for (r_idx, r) in right_rows.iter().enumerate() {
                         let merged = l.merge(r);
                         if eval_join_constraint(constraint, l, r, &merged)? {
+                            if out.len() >= MAX_WORKING_ROWS {
+                                return Err(EngineError::Evaluation(format!(
+                                    "FULL OUTER JOIN result exceeded maximum working row limit ({} rows)",
+                                    MAX_WORKING_ROWS
+                                )));
+                            }
                             out.push(merged);
                             matched = true;
                             right_matched[r_idx] = true;
                         }
                     }
                     if !matched {
+                        if out.len() >= MAX_WORKING_ROWS {
+                            return Err(EngineError::Evaluation(format!(
+                                "FULL OUTER JOIN result exceeded maximum working row limit ({} rows)",
+                                MAX_WORKING_ROWS
+                            )));
+                        }
                         out.push(l.merge(&null_right));
                     }
                 }
                 for (r_idx, r) in right_rows.iter().enumerate() {
                     if !right_matched[r_idx] {
+                        if out.len() >= MAX_WORKING_ROWS {
+                            return Err(EngineError::Evaluation(format!(
+                                "FULL OUTER JOIN result exceeded maximum working row limit ({} rows)",
+                                MAX_WORKING_ROWS
+                            )));
+                        }
                         out.push(null_left.merge(r));
                     }
                 }
@@ -1102,9 +1175,7 @@ fn preprocess_unnest_syntax(sql: &str) -> String {
 fn extract_unnest_factor(factor: &TableFactor) -> Option<(Expr, String)> {
     match factor {
         TableFactor::UNNEST {
-            alias,
-            array_exprs,
-            ..
+            alias, array_exprs, ..
         } => {
             let first_expr = array_exprs.first()?.clone();
             let alias_name = alias
@@ -1174,6 +1245,12 @@ fn apply_lateral_unnest<'a>(
         let val = eval_scalar_expr(array_expr, row)?;
         if let Value::Array(arr) = val {
             for elem in arr {
+                if out.len() >= MAX_WORKING_ROWS {
+                    return Err(EngineError::Evaluation(format!(
+                        "UNNEST result exceeded maximum working row limit ({} rows)",
+                        MAX_WORKING_ROWS
+                    )));
+                }
                 let elem_row = match elem {
                     Value::Object(obj_map) => {
                         let cols: Vec<String> = obj_map.keys().cloned().collect();
@@ -1182,11 +1259,7 @@ fn apply_lateral_unnest<'a>(
                     scalar => {
                         let mut m = Map::new();
                         m.insert(alias_name.to_string(), scalar);
-                        EvalRow::from_owned_single(
-                            alias_name,
-                            &[alias_name.to_string()],
-                            m,
-                        )
+                        EvalRow::from_owned_single(alias_name, &[alias_name.to_string()], m)
                     }
                 };
                 out.push(row.merge(&elem_row));
@@ -1269,10 +1342,8 @@ fn determine_projection_columns(
         .map(|r| r.table_order.as_slice())
         .unwrap_or(fallback_order);
 
-    let known_table_aliases: Vec<String> = active_order
-        .iter()
-        .map(|(a, _)| a.to_lowercase())
-        .collect();
+    let known_table_aliases: Vec<String> =
+        active_order.iter().map(|(a, _)| a.to_lowercase()).collect();
 
     for (idx, item) in projection.iter().enumerate() {
         match item {
@@ -1446,10 +1517,7 @@ fn eval_aggregate_function(
             ))
         }
         FunctionArguments::List(list) => {
-            if matches!(
-                list.duplicate_treatment,
-                Some(DuplicateTreatment::Distinct)
-            ) {
+            if matches!(list.duplicate_treatment, Some(DuplicateTreatment::Distinct)) {
                 is_distinct = true;
             }
             if let Some(first_arg) = list.args.first() {
@@ -1507,7 +1575,13 @@ fn eval_aggregate_function(
             let mut float_sum: f64 = 0.0;
             for v in &values {
                 if let Some(i) = v.as_i64() {
-                    int_sum = int_sum.saturating_add(i);
+                    if all_int {
+                        if let Some(next_sum) = int_sum.checked_add(i) {
+                            int_sum = next_sum;
+                        } else {
+                            all_int = false;
+                        }
+                    }
                     float_sum += i as f64;
                 } else if let Some(f) = value_as_f64(v) {
                     all_int = false;
@@ -1590,11 +1664,9 @@ fn eval_scalar_expr(expr: &Expr, row: &EvalRow<'_>) -> Result<Value, EngineError
         Expr::CompoundIdentifier(idents) => match idents.as_slice() {
             [a] => Ok(row.resolve_path(&[a.value.as_str()])),
             [a, b] => Ok(row.resolve_path(&[a.value.as_str(), b.value.as_str()])),
-            [a, b, c] => Ok(row.resolve_path(&[
-                a.value.as_str(),
-                b.value.as_str(),
-                c.value.as_str(),
-            ])),
+            [a, b, c] => {
+                Ok(row.resolve_path(&[a.value.as_str(), b.value.as_str(), c.value.as_str()]))
+            }
             [a, b, c, d] => Ok(row.resolve_path(&[
                 a.value.as_str(),
                 b.value.as_str(),
@@ -1728,7 +1800,10 @@ fn eval_scalar_expr(expr: &Expr, row: &EvalRow<'_>) -> Result<Value, EngineError
                 _ => Ok(Value::Bool(false)),
             }
         }
-        Expr::Subscript { expr: base, subscript } => {
+        Expr::Subscript {
+            expr: base,
+            subscript,
+        } => {
             let base_val = eval_scalar_expr(base, row)?;
             match subscript.as_ref() {
                 sqlparser::ast::Subscript::Index { index } => {
@@ -1742,7 +1817,9 @@ fn eval_scalar_expr(expr: &Expr, row: &EvalRow<'_>) -> Result<Value, EngineError
                             }
                         }
                         (Value::Object(map), Value::String(k)) => {
-                            Ok(get_field_case_insensitive(map, k).cloned().unwrap_or(Value::Null))
+                            Ok(get_field_case_insensitive(map, k)
+                                .cloned()
+                                .unwrap_or(Value::Null))
                         }
                         _ => Ok(Value::Null),
                     }
@@ -1868,7 +1945,11 @@ fn eval_unary_op(op: &UnaryOperator, val: &Value) -> Result<Value, EngineError> 
         UnaryOperator::Not => Ok(Value::Bool(!is_truthy(val))),
         UnaryOperator::Minus => {
             if let Some(i) = val.as_i64() {
-                Ok(Value::Number(Number::from(-i)))
+                if let Some(neg) = i.checked_neg() {
+                    Ok(Value::Number(Number::from(neg)))
+                } else {
+                    Ok(number_from_f64(-(i as f64)))
+                }
             } else if let Some(f) = value_as_f64(val) {
                 Ok(number_from_f64(-f))
             } else {
@@ -1937,9 +2018,9 @@ fn eval_binary_op(left: &Value, op: &BinaryOperator, right: &Value) -> Result<Va
                 )))
             }
         }
-        BinaryOperator::Plus => numeric_op(left, right, |a, b| a + b, |a, b| a + b),
-        BinaryOperator::Minus => numeric_op(left, right, |a, b| a - b, |a, b| a - b),
-        BinaryOperator::Multiply => numeric_op(left, right, |a, b| a * b, |a, b| a * b),
+        BinaryOperator::Plus => checked_numeric_op(left, right, i64::checked_add, |a, b| a + b),
+        BinaryOperator::Minus => checked_numeric_op(left, right, i64::checked_sub, |a, b| a - b),
+        BinaryOperator::Multiply => checked_numeric_op(left, right, i64::checked_mul, |a, b| a * b),
         BinaryOperator::Divide => {
             if let (Some(a), Some(b)) = (value_as_f64(left), value_as_f64(right)) {
                 if b.abs() < 1e-15 {
@@ -1951,12 +2032,21 @@ fn eval_binary_op(left: &Value, op: &BinaryOperator, right: &Value) -> Result<Va
                 Ok(Value::Null)
             }
         }
-        BinaryOperator::Modulo => numeric_op(
-            left,
-            right,
-            |a, b| if b == 0 { 0 } else { a % b },
-            |a, b| a % b,
-        ),
+        BinaryOperator::Modulo => {
+            if let (Some(li), Some(ri)) = (left.as_i64(), right.as_i64()) {
+                if ri == 0 {
+                    return Ok(Value::Null);
+                }
+                return Ok(Value::Number(Number::from(li.checked_rem(ri).unwrap_or(0))));
+            }
+            if let (Some(lf), Some(rf)) = (value_as_f64(left), value_as_f64(right)) {
+                if rf.abs() < 1e-15 {
+                    return Ok(Value::Null);
+                }
+                return Ok(number_from_f64(lf % rf));
+            }
+            Ok(Value::Null)
+        }
         BinaryOperator::StringConcat => {
             let ls = crate::cli::value_to_display_string(left);
             let rs = crate::cli::value_to_display_string(right);
@@ -1969,13 +2059,20 @@ fn eval_binary_op(left: &Value, op: &BinaryOperator, right: &Value) -> Result<Va
     }
 }
 
-fn numeric_op<FI, FF>(left: &Value, right: &Value, int_fn: FI, float_fn: FF) -> Result<Value, EngineError>
+fn checked_numeric_op<FI, FF>(
+    left: &Value,
+    right: &Value,
+    int_fn: FI,
+    float_fn: FF,
+) -> Result<Value, EngineError>
 where
-    FI: FnOnce(i64, i64) -> i64,
+    FI: FnOnce(i64, i64) -> Option<i64>,
     FF: FnOnce(f64, f64) -> f64,
 {
     if let (Some(li), Some(ri)) = (left.as_i64(), right.as_i64()) {
-        return Ok(Value::Number(Number::from(int_fn(li, ri))));
+        if let Some(res) = int_fn(li, ri) {
+            return Ok(Value::Number(Number::from(res)));
+        }
     }
     if let (Some(lf), Some(rf)) = (value_as_f64(left), value_as_f64(right)) {
         return Ok(number_from_f64(float_fn(lf, rf)));
@@ -2021,7 +2118,7 @@ fn eval_scalar_function(name: &str, args: &[Value]) -> Result<Value, EngineError
                 .clamp(0, 12) as u32;
             let factor = 10_f64.powi(decimals as i32);
             let rounded = (val * factor).round() / factor;
-            if decimals == 0 {
+            if decimals == 0 && rounded >= (i64::MIN as f64) && rounded < (i64::MAX as f64) {
                 Ok(Value::Number(Number::from(rounded as i64)))
             } else {
                 Ok(number_from_f64(rounded))
@@ -2029,7 +2126,11 @@ fn eval_scalar_function(name: &str, args: &[Value]) -> Result<Value, EngineError
         }
         "ABS" => {
             if let Some(i) = args.first().and_then(|v| v.as_i64()) {
-                Ok(Value::Number(Number::from(i.abs())))
+                if let Some(abs_i) = i.checked_abs() {
+                    Ok(Value::Number(Number::from(abs_i)))
+                } else {
+                    Ok(number_from_f64((i as f64).abs()))
+                }
             } else if let Some(f) = args.first().and_then(value_as_f64) {
                 Ok(number_from_f64(f.abs()))
             } else {
@@ -2125,9 +2226,7 @@ fn sort_output_rows(
                     Value::Null
                 }
             } else if let Expr::Identifier(Ident { value: id_name, .. }) = &ob.expr {
-                if let Some(col_idx) = columns
-                    .iter()
-                    .position(|c| c.eq_ignore_ascii_case(id_name))
+                if let Some(col_idx) = columns.iter().position(|c| c.eq_ignore_ascii_case(id_name))
                 {
                     out_row[col_idx].clone()
                 } else if let Some(ctx) = context_rows.get(r_idx) {
@@ -2188,14 +2287,22 @@ fn sort_output_rows(
 fn canonical_row_key(row: &[Value], out: &mut String) {
     out.clear();
     for v in row {
-        canonical_value_key(v, out);
+        canonical_value_key_bounded(v, out, 0);
         out.push('\x1f');
     }
 }
 
 /// Append a canonical representation of a single [`Value`] to `out` such that equal values produce identical keys.
 fn canonical_value_key(val: &Value, out: &mut String) {
+    canonical_value_key_bounded(val, out, 0);
+}
+
+fn canonical_value_key_bounded(val: &Value, out: &mut String, depth: usize) {
     use std::fmt::Write;
+    if depth >= MAX_VALUE_RECURSION_DEPTH {
+        out.push_str("...");
+        return;
+    }
     match val {
         Value::Null => out.push('N'),
         Value::Bool(true) => out.push_str("B1"),
@@ -2216,7 +2323,7 @@ fn canonical_value_key(val: &Value, out: &mut String) {
         Value::Array(arr) => {
             out.push('[');
             for el in arr {
-                canonical_value_key(el, out);
+                canonical_value_key_bounded(el, out, depth + 1);
                 out.push(',');
             }
             out.push(']');
@@ -2225,7 +2332,7 @@ fn canonical_value_key(val: &Value, out: &mut String) {
             out.push('{');
             for (k, v) in map {
                 let _ = write!(out, "{}:", k);
-                canonical_value_key(v, out);
+                canonical_value_key_bounded(v, out, depth + 1);
                 out.push(',');
             }
             out.push('}');
@@ -2259,6 +2366,13 @@ pub fn compare_json_values(a: &Value, b: &Value) -> Ordering {
 }
 
 pub fn values_equal(a: &Value, b: &Value) -> bool {
+    values_equal_bounded(a, b, 0)
+}
+
+fn values_equal_bounded(a: &Value, b: &Value, depth: usize) -> bool {
+    if depth >= MAX_VALUE_RECURSION_DEPTH {
+        return a == b;
+    }
     match (a, b) {
         (Value::Null, Value::Null) => true,
         (Value::Bool(ba), Value::Bool(bb)) => ba == bb,
@@ -2273,9 +2387,20 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         }
         (Value::String(sa), Value::String(sb)) => sa == sb,
         (Value::Array(aa), Value::Array(ab)) => {
-            aa.len() == ab.len() && aa.iter().zip(ab.iter()).all(|(x, y)| values_equal(x, y))
+            aa.len() == ab.len()
+                && aa
+                    .iter()
+                    .zip(ab.iter())
+                    .all(|(x, y)| values_equal_bounded(x, y, depth + 1))
         }
-        (Value::Object(oa), Value::Object(ob)) => oa == ob,
+        (Value::Object(oa), Value::Object(ob)) => {
+            oa.len() == ob.len()
+                && oa.iter().all(|(k, va)| {
+                    ob.get(k)
+                        .map(|vb| values_equal_bounded(va, vb, depth + 1))
+                        .unwrap_or(false)
+                })
+        }
         _ => false,
     }
 }
@@ -2327,6 +2452,7 @@ fn object_name_to_string(name: &ObjectName) -> String {
 }
 
 /// SQL `LIKE` / `ILIKE` pattern matcher supporting `%` (0 or more chars) and `_` (any 1 char).
+/// Uses an O(N) 1D rolling buffer instead of an O(M * N) 2D matrix to avoid heap allocations per text character.
 fn sql_like_match(text: &str, pattern: &str, case_insensitive: bool) -> bool {
     let t_chars: Vec<char> = if case_insensitive {
         text.to_lowercase().chars().collect()
@@ -2340,24 +2466,29 @@ fn sql_like_match(text: &str, pattern: &str, case_insensitive: bool) -> bool {
     };
 
     let (m, n) = (t_chars.len(), p_chars.len());
-    let mut dp = vec![vec![false; n + 1]; m + 1];
-    dp[0][0] = true;
+    let mut prev = vec![false; n + 1];
+    let mut curr = vec![false; n + 1];
+    prev[0] = true;
 
     for j in 1..=n {
         if p_chars[j - 1] == '%' {
-            dp[0][j] = dp[0][j - 1];
+            prev[j] = prev[j - 1];
         }
     }
 
     for i in 1..=m {
+        curr[0] = false;
         for j in 1..=n {
             if p_chars[j - 1] == '%' {
-                dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
+                curr[j] = curr[j - 1] || prev[j];
             } else if p_chars[j - 1] == '_' || p_chars[j - 1] == t_chars[i - 1] {
-                dp[i][j] = dp[i - 1][j - 1];
+                curr[j] = prev[j - 1];
+            } else {
+                curr[j] = false;
             }
         }
+        std::mem::swap(&mut prev, &mut curr);
     }
 
-    dp[m][n]
+    prev[n]
 }
