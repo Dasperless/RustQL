@@ -1,0 +1,6 @@
+{"order_id": 101, "user_id": 1, "total": 249.50, "status": "shipped", "created_at": "2026-02-10", "items": [{"sku": "KB-01", "name": "Mechanical Keyboard", "qty": 1, "price": 189.50}, {"sku": "CB-02", "name": "USB-C Coiled Cable", "qty": 2, "price": 30.00}]}
+{"order_id": 102, "user_id": 2, "total": 599.00, "status": "delivered", "created_at": "2026-02-12", "items": [{"sku": "MN-4K", "name": "27-inch 4K Monitor", "qty": 1, "price": 599.00}]}
+{"order_id": 103, "user_id": 1, "total": 89.99, "status": "delivered", "created_at": "2026-02-18", "items": [{"sku": "MS-PRO", "name": "Wireless Trackball", "qty": 1, "price": 89.99}]}
+{"order_id": 104, "user_id": 3, "total": 145.00, "status": "processing", "created_at": "2026-03-01", "items": [{"sku": "HD-NC", "name": "Noise Cancelling Headset", "qty": 1, "price": 145.00}]}
+{"order_id": 105, "user_id": 5, "total": 1299.00, "status": "shipped", "created_at": "2026-03-04", "items": [{"sku": "DK-ST", "name": "Standing Desk Frame", "qty": 1, "price": 799.00}, {"sku": "CH-ER", "name": "Ergonomic Mesh Chair", "qty": 1, "price": 500.00}]}
+{"order_id": 106, "user_id": 2, "total": 45.00, "status": "cancelled", "created_at": "2026-03-07", "items": [{"sku": "PD-XL", "name": "Desk Mat XL", "qty": 1, "price": 45.00}]}

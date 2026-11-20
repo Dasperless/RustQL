@@ -1,0 +1,11 @@
+{
+  "organization": "Rustrix Labs",
+  "environment": "production",
+  "cluster": {
+    "primary_region": "us-east-1",
+    "failover_region": "eu-central-1",
+    "max_connections": 2048,
+    "tls_enabled": true
+  },
+  "features": ["streaming", "ndjson_cache", "sql_joins", "unnest"]
+}

@@ -1,0 +1,72 @@
+[
+  {
+    "id": 1,
+    "name": "Alice Vance",
+    "role": "Staff Engineer",
+    "department": "Platform",
+    "salary": 165000,
+    "active": true,
+    "address": {
+      "city": "Seattle",
+      "state": "WA",
+      "country": "USA"
+    },
+    "tags": ["rust", "sql", "distributed"]
+  },
+  {
+    "id": 2,
+    "name": "Bob Chen",
+    "role": "Senior Engineer",
+    "department": "Platform",
+    "salary": 148000,
+    "active": true,
+    "address": {
+      "city": "Austin",
+      "state": "TX",
+      "country": "USA"
+    },
+    "tags": ["rust", "tui", "linux"]
+  },
+  {
+    "id": 3,
+    "name": "Clara Diaz",
+    "role": "Product Manager",
+    "department": "Product",
+    "salary": 142000,
+    "active": true,
+    "address": {
+      "city": "New York",
+      "state": "NY",
+      "country": "USA"
+    },
+    "tags": ["roadmap", "analytics"]
+  },
+  {
+    "id": 4,
+    "name": "David Kim",
+    "role": "Data Analyst",
+    "department": "Analytics",
+    "salary": 118000,
+    "active": false,
+    "address": {
+      "city": "Seattle",
+      "state": "WA",
+      "country": "USA"
+    },
+    "tags": ["sql", "analytics", "python"]
+  },
+  {
+    "id": 5,
+    "name": "Elena Rostova",
+    "role": "Principal Engineer",
+    "department": "Platform",
+    "salary": 192000,
+    "active": true,
+    "address": {
+      "city": "San Francisco",
+      "state": "CA",
+      "country": "USA"
+    },
+    "tags": ["rust", "architecture", "performance"]
+  }
+]
