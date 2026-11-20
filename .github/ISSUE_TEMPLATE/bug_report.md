@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-about: Report a bug or unexpected behavior in Rustrix CLI, SQL engine, or TUI
+about: Report a bug or unexpected behavior in RustQL CLI, SQL engine, or TUI
 title: "[Bug]: "
 labels: bug
 ---
@@ -15,7 +15,7 @@ A clear and concise description of what happened.
    ```
 2. Command or SQL query executed:
    ```bash
-   rustrix -q "SELECT * FROM ..." sample.json
+   rustql -q "SELECT * FROM ..." sample.json
    ```
 3. Observed output or error message:
 
@@ -23,6 +23,6 @@ A clear and concise description of what happened.
 What you expected the query or TUI to produce.
 
 ## Environment
-- **Rustrix Version** (`rustrix --version`):
+- **RustQL Version** (`rustql --version`):
 - **OS & Architecture** (e.g. Linux x86_64, macOS arm64, Windows 11 x64):
 - **Terminal Emulator** (if TUI-related):

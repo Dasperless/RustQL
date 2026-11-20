@@ -74,15 +74,15 @@ jobs:
       - name: Sign and verify macOS Mach-O binary
         if: runner.os == 'macOS'
         run: |
-          codesign --force --deep --sign - "target/${{ matrix.target }}/release/rustrix"
-          codesign --verify --verbose "target/${{ matrix.target }}/release/rustrix"
+          codesign --force --deep --sign - "target/${{ matrix.target }}/release/rustql"
+          codesign --verify --verbose "target/${{ matrix.target }}/release/rustql"
 
       - name: Smoke test compiled release binary
         shell: bash
         run: |
-          BIN_PATH="target/${{ matrix.target }}/release/rustrix"
+          BIN_PATH="target/${{ matrix.target }}/release/rustql"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            BIN_PATH="target/${{ matrix.target }}/release/rustrix.exe"
+            BIN_PATH="target/${{ matrix.target }}/release/rustql.exe"
           fi
           if [ "${{ matrix.target }}" != "x86_64-apple-darwin" ]; then
             "$BIN_PATH" --version
@@ -92,9 +92,9 @@ jobs:
       - name: Package versioned release archive (Unix)
         if: runner.os != 'Windows'
         run: |
-          STAGE_DIR="rustrix-${RELEASE_TAG}-${{ matrix.target }}"
+          STAGE_DIR="rustql-${RELEASE_TAG}-${{ matrix.target }}"
           mkdir -p "$STAGE_DIR"
-          cp "target/${{ matrix.target }}/release/rustrix" "$STAGE_DIR/"
+          cp "target/${{ matrix.target }}/release/rustql" "$STAGE_DIR/"
           cp README.md LICENSE SECURITY.md install.sh "$STAGE_DIR/"
           tar -czf "${STAGE_DIR}.tar.gz" "$STAGE_DIR"
           shasum -a 256 "${STAGE_DIR}.tar.gz" > "${STAGE_DIR}.tar.gz.sha256"
@@ -103,9 +103,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $StageDir = "rustrix-$env:RELEASE_TAG-${{ matrix.target }}"
+          $StageDir = "rustql-$env:RELEASE_TAG-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/rustrix.exe" "$StageDir/"
+          Copy-Item "target/${{ matrix.target }}/release/rustql.exe" "$StageDir/"
           Copy-Item README.md, LICENSE, SECURITY.md, install.ps1 "$StageDir/"
           Compress-Archive -Path "$StageDir" -DestinationPath "$StageDir.zip" -Force
           $Hash = (Get-FileHash -Algorithm SHA256 "$StageDir.zip").Hash.ToLower()
@@ -114,15 +114,15 @@ jobs:
       - name: Attest build provenance for release archive
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: "rustrix-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}"
+          subject-path: "rustql-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
           path: |
-            rustrix-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}
-            rustrix-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}.sha256
+            rustql-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+            rustql-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}.sha256
 
   publish-release:
     name: Publish GitHub Release

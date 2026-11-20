@@ -815,7 +815,7 @@ fn simple_value_type(v: &Value) -> &'static str {
 }
 
 fn default_cache_dir() -> PathBuf {
-    std::env::temp_dir().join("rustrix_cache")
+    std::env::temp_dir().join("rustql_cache")
 }
 
 fn canonical_path_string(path: &Path) -> String {

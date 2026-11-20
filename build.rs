@@ -44,17 +44,17 @@ fn embed_windows_metadata() {
 
     // 1. Write Windows Application Manifest declaring standard user execution (asInvoker),
     //    Windows 10/11 compatibility GUIDs, longPathAware, and UTF-8 activeCodePage.
-    let manifest_path = out_dir.join("rustrix.exe.manifest");
+    let manifest_path = out_dir.join("rustql.exe.manifest");
     let manifest_xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity
     type="win32"
-    name="Dasperless.Rustrix.CLI"
+    name="Dasperless.RustQL.CLI"
     version="{}.{}.{}.0"
     processorArchitecture="*"
   />
-  <description>Rustrix - Pure-Rust Terminal UI and CLI for SQL Queries on JSON Files</description>
+  <description>RustQL - Pure-Rust Terminal UI and CLI for SQL Queries on JSON Files</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
@@ -88,8 +88,8 @@ fn embed_windows_metadata() {
     }
 
     // 2. Write and compile Windows VERSIONINFO resource (.rc -> .res) if rc.exe or llvm-rc is available
-    let rc_path = out_dir.join("rustrix.rc");
-    let res_path = out_dir.join("rustrix.res");
+    let rc_path = out_dir.join("rustql.rc");
+    let res_path = out_dir.join("rustql.res");
     let rc_content = format!(
         r#"#pragma code_page(65001)
 1 VERSIONINFO
@@ -106,12 +106,12 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Darío Vargas (Dasperless)\0"
-            VALUE "FileDescription", "Rustrix - Pure-Rust TUI and CLI for SQL Queries on JSON Files\0"
+            VALUE "FileDescription", "RustQL - Pure-Rust TUI and CLI for SQL Queries on JSON Files\0"
             VALUE "FileVersion", "{pkg_version}\0"
-            VALUE "InternalName", "rustrix\0"
+            VALUE "InternalName", "rustql\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Darío Vargas. MIT License.\0"
-            VALUE "OriginalFilename", "rustrix.exe\0"
-            VALUE "ProductName", "Rustrix\0"
+            VALUE "OriginalFilename", "rustql.exe\0"
+            VALUE "ProductName", "RustQL\0"
             VALUE "ProductVersion", "{pkg_version}\0"
         END
     END

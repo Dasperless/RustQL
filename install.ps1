@@ -1,11 +1,11 @@
-# Rustrix Windows Installer
-# https://github.com/Dasperless/Rustrix
+# RustQL Windows Installer
+# https://github.com/Dasperless/RustQL
 #
 # Quick 1-Liner Install (Run in PowerShell / Windows Terminal):
-#   irm https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Dasperless/RustQL/main/install.ps1 | iex
 #
 # Or with explicit execution policy bypass:
-#   powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Dasperless/Rustrix/main/install.ps1 | iex"
+#   powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Dasperless/RustQL/main/install.ps1 | iex"
 
 [CmdletBinding()]
 param(
@@ -16,7 +16,7 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Repo = "Dasperless/Rustrix"
+$Repo = "Dasperless/RustQL"
 $GitHubUrl = "https://github.com/$Repo"
 
 function Write-Info($msg) {
@@ -42,7 +42,7 @@ function Write-ErrMsg($msg) {
 
 # 1. Architecture Check
 if (-not [Environment]::Is64BitOperatingSystem) {
-    Write-ErrMsg "Rustrix prebuilt binaries require 64-bit Windows (x86_64). For 32-bit, please build from source using 'cargo build --release'."
+    Write-ErrMsg "RustQL prebuilt binaries require 64-bit Windows (x86_64). For 32-bit, please build from source using 'cargo build --release'."
 }
 
 # 2. Determine Version
@@ -50,7 +50,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
     Write-Info "Resolving latest release for $Repo..."
     try {
         $LatestUrl = "https://api.github.com/repos/$Repo/releases/latest"
-        $ReleaseInfo = Invoke-RestMethod -Uri $LatestUrl -UseBasicParsing -Headers @{ "User-Agent" = "Rustrix-Installer" }
+        $ReleaseInfo = Invoke-RestMethod -Uri $LatestUrl -UseBasicParsing -Headers @{ "User-Agent" = "RustQL-Installer" }
         if ($ReleaseInfo -and $ReleaseInfo.tag_name) {
             $Version = $ReleaseInfo.tag_name
         }
@@ -68,15 +68,15 @@ if (-not $Version.StartsWith("v")) {
 }
 
 $Target = "x86_64-pc-windows-msvc"
-$ArchiveName = "rustrix-$Version-$Target.zip"
+$ArchiveName = "rustql-$Version-$Target.zip"
 $DownloadUrl = "$GitHubUrl/releases/download/$Version/$ArchiveName"
 $ShaUrl = "$DownloadUrl.sha256"
 
-Write-Info "Installing Rustrix $Version ($Target)..."
+Write-Info "Installing RustQL $Version ($Target)..."
 
 # 3. Determine Installation Directory
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
-    $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\rustrix"
+    $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\rustql"
 }
 
 if (-not (Test-Path -Path $InstallDir)) {
@@ -84,7 +84,7 @@ if (-not (Test-Path -Path $InstallDir)) {
 }
 
 # 4. Download Release Archive to Temp
-$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rustrix_install_" + [System.Guid]::NewGuid().ToString())
+$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rustql_install_" + [System.Guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 $ZipPath = Join-Path $TempDir $ArchiveName
 
@@ -114,17 +114,17 @@ try {
     Write-Info "Extracting binary..."
     Expand-Archive -Path $ZipPath -DestinationPath $TempDir -Force
 
-    $ExtractedBin = Join-Path $TempDir "rustrix-$Version-$Target\rustrix.exe"
+    $ExtractedBin = Join-Path $TempDir "rustql-$Version-$Target\rustql.exe"
     if (-not (Test-Path -Path $ExtractedBin)) {
-        $ExtractedBin = Join-Path $TempDir "rustrix.exe"
+        $ExtractedBin = Join-Path $TempDir "rustql.exe"
     }
 
     if (-not (Test-Path -Path $ExtractedBin)) {
-        Write-ErrMsg "Could not find rustrix.exe in extracted archive."
+        Write-ErrMsg "Could not find rustql.exe in extracted archive."
     }
 
     # 7. Copy to Target Directory and Unblock
-    $DestExe = Join-Path $InstallDir "rustrix.exe"
+    $DestExe = Join-Path $InstallDir "rustql.exe"
     Copy-Item -Path $ExtractedBin -Destination $DestExe -Force
 
     # Unblock final binary to guarantee zero SmartScreen / antivirus warning dialogs
@@ -145,7 +145,7 @@ try {
         $env:Path = "$InstallDir;$env:Path"
     }
 
-    Write-Success "Rustrix successfully installed to: $DestExe"
+    Write-Success "RustQL successfully installed to: $DestExe"
 
     # 9. Verify Installation
     try {
@@ -157,12 +157,12 @@ try {
     Write-Host ""
     Write-Host "Quick Start on Windows:" -ForegroundColor Cyan
     Write-Host "  Interactive TUI (Windows Terminal recommended):" -ForegroundColor White
-    Write-Host "    rustrix examples\users.json examples\orders.ndjson" -ForegroundColor Green
+    Write-Host "    rustql examples\users.json examples\orders.ndjson" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Run SQL in PowerShell (use single quotes for SQL):" -ForegroundColor White
-    Write-Host "    rustrix -q 'SELECT id, name, department FROM users WHERE active = true' examples\users.json" -ForegroundColor Green
+    Write-Host "    rustql -q 'SELECT id, name, department FROM users WHERE active = true' examples\users.json" -ForegroundColor Green
     Write-Host ""
-    Write-Host "  Documentation: https://github.com/Dasperless/Rustrix#readme" -ForegroundColor Gray
+    Write-Host "  Documentation: https://github.com/Dasperless/RustQL#readme" -ForegroundColor Gray
 } finally {
     if (Test-Path -Path $TempDir) {
         Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
