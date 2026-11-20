@@ -209,7 +209,8 @@ pub fn diagnose_sql_error(sql: &str, raw_error: &str, engine: &QueryEngine) -> S
     // Check if an unknown table name was used after FROM or JOIN
     for window in tokens.windows(2) {
         if window[0].eq_ignore_ascii_case("FROM") || window[0].eq_ignore_ascii_case("JOIN") {
-            let candidate_table = window[1].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            let candidate_table =
+                window[1].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
             if !candidate_table.is_empty()
                 && !candidate_table.eq_ignore_ascii_case("UNNEST")
                 && engine.resolve_table(candidate_table).is_err()
@@ -251,9 +252,12 @@ fn validate_parsed_query(query: &Query, engine: &QueryEngine) -> SqlValidationSt
     let mut table_aliases: Vec<String> = Vec::new();
 
     for twj in &select.from {
-        if let Err(status) =
-            collect_and_validate_table_factor(&twj.relation, engine, &mut active_tables, &mut table_aliases)
-        {
+        if let Err(status) = collect_and_validate_table_factor(
+            &twj.relation,
+            engine,
+            &mut active_tables,
+            &mut table_aliases,
+        ) {
             return status;
         }
         for join in &twj.joins {
@@ -395,7 +399,10 @@ fn collect_and_validate_table_factor<'a>(
     active_tables: &mut Vec<&'a LoadedTable>,
     table_aliases: &mut Vec<String>,
 ) -> Result<(), SqlValidationStatus> {
-    if let TableFactor::Table { name, alias, args, .. } = factor {
+    if let TableFactor::Table {
+        name, alias, args, ..
+    } = factor
+    {
         let raw_name = name
             .0
             .iter()
@@ -436,15 +443,9 @@ fn collect_and_validate_table_factor<'a>(
             }
         }
     } else {
-        if let TableFactor::UNNEST {
-            alias: Some(a), ..
-        }
-        | TableFactor::Function {
-            alias: Some(a), ..
-        }
-        | TableFactor::Derived {
-            alias: Some(a), ..
-        } = factor
+        if let TableFactor::UNNEST { alias: Some(a), .. }
+        | TableFactor::Function { alias: Some(a), .. }
+        | TableFactor::Derived { alias: Some(a), .. } = factor
         {
             table_aliases.push(a.name.value.clone());
         }
@@ -628,7 +629,11 @@ fn detect_keyword_typo(tokens: &[String], engine: &QueryEngine) -> Option<(Strin
     for tok in tokens.iter().skip(1) {
         if tok.starts_with('\'')
             || tok.starts_with('"')
-            || tok.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            || tok
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
             || tok.contains('.')
             || tok.contains('=')
             || tok.contains('>')
@@ -666,25 +671,29 @@ fn detect_incomplete_trailing_clause(trimmed: &str, tokens: &[String]) -> Option
         return Some("… Expecting next column or expression after ','".to_string());
     }
     match last.as_str() {
-        "SELECT" => Some("… Expecting columns or * after SELECT (press Tab to autocomplete)".to_string()),
-        "DISTINCT" => Some("… Expecting column name after DISTINCT".to_string()),
-        "FROM" | "JOIN" => Some("… Expecting table name after FROM/JOIN (press Tab to autocomplete)".to_string()),
-        "WHERE" | "AND" | "OR" => {
-            Some("… Expecting condition (e.g. col = 'value', col > 10, col ILIKE '%text%')".to_string())
+        "SELECT" => {
+            Some("… Expecting columns or * after SELECT (press Tab to autocomplete)".to_string())
         }
+        "DISTINCT" => Some("… Expecting column name after DISTINCT".to_string()),
+        "FROM" | "JOIN" => {
+            Some("… Expecting table name after FROM/JOIN (press Tab to autocomplete)".to_string())
+        }
+        "WHERE" | "AND" | "OR" => Some(
+            "… Expecting condition (e.g. col = 'value', col > 10, col ILIKE '%text%')".to_string(),
+        ),
         "GROUP" => Some("… Expecting BY <column> after GROUP".to_string()),
         "ORDER" => Some("… Expecting BY <column> [ASC|DESC] after ORDER".to_string()),
         "BY" => Some("… Expecting column name after BY (press Tab to autocomplete)".to_string()),
-        "HAVING" => Some("… Expecting aggregate condition after HAVING (e.g. COUNT(*) > 1)".to_string()),
+        "HAVING" => {
+            Some("… Expecting aggregate condition after HAVING (e.g. COUNT(*) > 1)".to_string())
+        }
         "LIMIT" => Some("… Expecting row count after LIMIT (e.g. 100)".to_string()),
         "OFFSET" => Some("… Expecting row offset number after OFFSET".to_string()),
         "ON" => Some("… Expecting join condition after ON (e.g. a.id = b.user_id)".to_string()),
         "=" | "!=" | "<>" | ">" | "<" | ">=" | "<=" => {
             Some("… Expecting value after operator (press Tab for sample values)".to_string())
         }
-        "LIKE" | "ILIKE" => {
-            Some("… Expecting pattern string (e.g. '%search%')".to_string())
-        }
+        "LIKE" | "ILIKE" => Some("… Expecting pattern string (e.g. '%search%')".to_string()),
         "IN" => Some("… Expecting value list in parentheses: ('val1', 'val2')".to_string()),
         "IS" => Some("… Expecting NULL or NOT NULL after IS".to_string()),
         "NOT" => Some("… Expecting NULL, IN, LIKE, or condition after NOT".to_string()),
@@ -733,7 +742,11 @@ pub fn compute_sql_suggestions(
     // 1. Empty query or typing first keyword
     if prev_tokens.is_empty() {
         if let Some(t) = primary_table {
-            let lim = if t.rows.len() > 1000 { " LIMIT 1000" } else { "" };
+            let lim = if t.rows.len() > 1000 {
+                " LIMIT 1000"
+            } else {
+                ""
+            };
             candidates.push(SqlSuggestion {
                 label: format!("SELECT * FROM {}{}", t.name, lim),
                 insert_text: format!("SELECT * FROM {}{}", t.name, lim),
@@ -918,13 +931,21 @@ pub fn compute_sql_suggestions(
                 }
                 add_schema_field_suggestions(&mut candidates, engine, primary_table, replace_len);
                 for (fn_label, fn_insert, desc) in [
-                    ("COUNT(*)", "COUNT(*) AS count ", "Count total rows in group"),
+                    (
+                        "COUNT(*)",
+                        "COUNT(*) AS count ",
+                        "Count total rows in group",
+                    ),
                     ("SUM(col)", "SUM(", "Sum numeric values"),
                     ("AVG(col)", "AVG(", "Average numeric values"),
                     ("MIN(col)", "MIN(", "Minimum value"),
                     ("MAX(col)", "MAX(", "Maximum value"),
                     ("DISTINCT", "DISTINCT ", "Return unique rows only"),
-                    ("UNNEST(array_col)", "UNNEST(", "Expand array elements into rows"),
+                    (
+                        "UNNEST(array_col)",
+                        "UNNEST(",
+                        "Expand array elements into rows",
+                    ),
                 ] {
                     candidates.push(SqlSuggestion {
                         label: fn_label.to_string(),
@@ -965,13 +986,25 @@ pub fn compute_sql_suggestions(
         "FROM" => {
             // We are after `FROM <table>` -> suggest WHERE, GROUP BY, ORDER BY, LIMIT, JOIN
             for (label, insert, desc) in [
-                ("WHERE", "WHERE ", "Filter rows by condition (e.g. col = 'value')"),
+                (
+                    "WHERE",
+                    "WHERE ",
+                    "Filter rows by condition (e.g. col = 'value')",
+                ),
                 ("GROUP BY", "GROUP BY ", "Group rows for COUNT / SUM / AVG"),
-                ("ORDER BY", "ORDER BY ", "Sort results ascending or descending"),
+                (
+                    "ORDER BY",
+                    "ORDER BY ",
+                    "Sort results ascending or descending",
+                ),
                 ("LIMIT 100", "LIMIT 100", "Cap result to 100 rows"),
                 ("LIMIT 10", "LIMIT 10", "Cap result to 10 rows"),
                 ("JOIN", "JOIN ", "Inner join with another loaded JSON file"),
-                ("LEFT JOIN", "LEFT JOIN ", "Left outer join with another JSON file"),
+                (
+                    "LEFT JOIN",
+                    "LEFT JOIN ",
+                    "Left outer join with another JSON file",
+                ),
             ] {
                 candidates.push(SqlSuggestion {
                     label: label.to_string(),
@@ -983,7 +1016,10 @@ pub fn compute_sql_suggestions(
             }
         }
         "WHERE" | "ON" | "HAVING" => {
-            if matches!(last_tok.as_str(), "WHERE" | "AND" | "OR" | "NOT" | "ON" | "HAVING") {
+            if matches!(
+                last_tok.as_str(),
+                "WHERE" | "AND" | "OR" | "NOT" | "ON" | "HAVING"
+            ) {
                 add_schema_field_suggestions(&mut candidates, engine, primary_table, replace_len);
                 candidates.push(SqlSuggestion {
                     label: "LOWER(col)".to_string(),
@@ -1219,13 +1255,11 @@ fn lookup_dot_path_in_row<'a>(row: &'a Map<String, Value>, parts: &[&str]) -> Op
     if parts.is_empty() {
         return None;
     }
-    let mut current = row
-        .get(parts[0])
-        .or_else(|| {
-            row.iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(parts[0]))
-                .map(|(_, v)| v)
-        })?;
+    let mut current = row.get(parts[0]).or_else(|| {
+        row.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(parts[0]))
+            .map(|(_, v)| v)
+    })?;
 
     for &part in &parts[1..] {
         match current {
@@ -1261,7 +1295,11 @@ pub fn highlight_sql_line(
     engine: &QueryEngine,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let table_names: Vec<String> = engine.tables().iter().map(|t| t.name.to_lowercase()).collect();
+    let table_names: Vec<String> = engine
+        .tables()
+        .iter()
+        .map(|t| t.name.to_lowercase())
+        .collect();
 
     // Compute inline ghost text suffix if the cursor is at the end of the current word
     let ghost_suffix: Option<String> = ghost_suggestion.and_then(|sug| {
@@ -1321,7 +1359,10 @@ pub fn highlight_sql_line(
                 i += 1;
             }
             let literal: String = chars[start..i].iter().collect();
-            spans.push(Span::styled(literal, Style::default().fg(Color::LightGreen)));
+            spans.push(Span::styled(
+                literal,
+                Style::default().fg(Color::LightGreen),
+            ));
             continue;
         }
 
@@ -1404,7 +1445,10 @@ pub fn merge_where_condition(
     );
 
     let (head, tail) = match tail_split {
-        Some(idx) => (trimmed[..idx].trim_end(), format!(" {}", trimmed[idx..].trim_start())),
+        Some(idx) => (
+            trimmed[..idx].trim_end(),
+            format!(" {}", trimmed[idx..].trim_start()),
+        ),
         None => (trimmed, String::new()),
     };
 
@@ -1555,7 +1599,10 @@ pub fn build_cell_quick_actions(
         });
 
         actions.push(QuickFilterAction {
-            title: format!("Replace WHERE:   SELECT * FROM {} WHERE {} = {}", table_name, col_name, literal),
+            title: format!(
+                "Replace WHERE:   SELECT * FROM {} WHERE {} = {}",
+                table_name, col_name, literal
+            ),
             sql: format!(
                 "SELECT * FROM {} WHERE {} = {}{}",
                 table_name, col_name, literal, default_limit
@@ -1591,9 +1638,7 @@ pub fn build_cell_quick_actions(
 pub fn build_sql_templates(engine: &QueryEngine) -> Vec<SqlTemplateRecipe> {
     let tables = engine.tables();
     let first_table = tables.first().copied();
-    let table_name = first_table
-        .map(|t| t.name.as_str())
-        .unwrap_or("data");
+    let table_name = first_table.map(|t| t.name.as_str()).unwrap_or("data");
     let row_count = first_table.map(|t| t.rows.len()).unwrap_or(0);
     let default_limit = if row_count > 1000 { " LIMIT 100" } else { "" };
 
@@ -1835,7 +1880,10 @@ mod tests {
         let (_tmp, engine) = sample_engine();
 
         // 1. Valid SQL
-        let status_ok = validate_sql_live("SELECT name, salary FROM users WHERE active = true", &engine);
+        let status_ok = validate_sql_live(
+            "SELECT name, salary FROM users WHERE active = true",
+            &engine,
+        );
         assert!(matches!(status_ok, SqlValidationStatus::Valid { .. }));
 
         // 2. Typo in keyword ('WHER' -> 'WHERE', 'FORM' -> 'FROM')
@@ -1874,14 +1922,22 @@ mod tests {
         // 1. After `FROM ` -> suggests tables (`users`, `orders`)
         let q1 = "SELECT * FROM ";
         let s1 = compute_sql_suggestions(q1, q1.len(), &engine);
-        assert!(s1.iter().any(|s| s.label == "users" && s.category == "table"));
-        assert!(s1.iter().any(|s| s.label == "orders" && s.category == "table"));
+        assert!(s1
+            .iter()
+            .any(|s| s.label == "users" && s.category == "table"));
+        assert!(s1
+            .iter()
+            .any(|s| s.label == "orders" && s.category == "table"));
 
         // 2. After `SELECT * FROM users WHERE ` -> suggests fields (`name`, `address.city`, etc.)
         let q2 = "SELECT * FROM users WHERE ";
         let s2 = compute_sql_suggestions(q2, q2.len(), &engine);
-        assert!(s2.iter().any(|s| s.label == "name" && s.category == "field"));
-        assert!(s2.iter().any(|s| s.label == "address.city" && s.category == "field"));
+        assert!(s2
+            .iter()
+            .any(|s| s.label == "name" && s.category == "field"));
+        assert!(s2
+            .iter()
+            .any(|s| s.label == "address.city" && s.category == "field"));
 
         // 3. After `SELECT * FROM users WHERE name ` -> suggests operators with real sample value (`= 'Alice Vance'`)
         let q3 = "SELECT * FROM users WHERE name ";

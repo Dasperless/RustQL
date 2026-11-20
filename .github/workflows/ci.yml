@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
+
+jobs:
+  test-and-lint:
+    name: Build, Lint & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Check compiler & Clippy lints (zero warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Verify documentation builds without warnings
+        run: cargo doc --no-deps
+
+      - name: Run unit, integration, and doc tests
+        run: cargo test
+
+      - name: Build production release binary
+        run: cargo build --release
+
+      - name: Verify CLI version and non-interactive query execution
+        run: |
+          ./target/release/rustrix --version
+          ./target/release/rustrix -q "SELECT id, name, department FROM users WHERE active = true ORDER BY salary DESC" examples/users.json
+
+  memory-leak-check:
+    name: Valgrind Memory Leak & Safety Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run Valgrind full leak check across SQL queries, JOINs, UNNEST, and caching
+        run: |
+          valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=1 \
+            ./target/release/rustrix -q "SELECT u.name, o.order_id, item.sku, c.warehouse.city FROM users u JOIN orders o ON u.id = o.user_id, UNNEST(o.items) AS item JOIN nested_catalog c ON item.sku = c.sku ORDER BY o.order_id" \
+            examples/users.json examples/orders.ndjson examples/nested_catalog.json
+
+          valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=1 \
+            ./target/release/rustrix --no-cache --format json -q "SELECT department, COUNT(*) AS cnt, SUM(salary) AS total, AVG(salary) AS avg_sal FROM users GROUP BY department ORDER BY cnt DESC" \
+            examples/users.json

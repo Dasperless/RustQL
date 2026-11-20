@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-release:
+    name: Build Release (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Verify tag version matches Cargo.toml version
+        shell: bash
+        run: |
+          RAW_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG_VER="${RAW_TAG#v}"
+          CARGO_VER=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2)
+          if [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "Error: Git tag version ($TAG_VER) does not match Cargo.toml version ($CARGO_VER)"
+            exit 1
+          fi
+          echo "RELEASE_TAG=v${CARGO_VER}" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Sign and verify macOS Mach-O binary
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - "target/${{ matrix.target }}/release/rustrix"
+          codesign --verify --verbose "target/${{ matrix.target }}/release/rustrix"
+
+      - name: Smoke test compiled release binary
+        shell: bash
+        run: |
+          BIN_PATH="target/${{ matrix.target }}/release/rustrix"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN_PATH="target/${{ matrix.target }}/release/rustrix.exe"
+          fi
+          if [ "${{ matrix.target }}" != "x86_64-apple-darwin" ]; then
+            "$BIN_PATH" --version
+            "$BIN_PATH" -q "SELECT COUNT(*) FROM users" examples/users.json
+          fi
+
+      - name: Package versioned release archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          STAGE_DIR="rustrix-${RELEASE_TAG}-${{ matrix.target }}"
+          mkdir -p "$STAGE_DIR"
+          cp "target/${{ matrix.target }}/release/rustrix" "$STAGE_DIR/"
+          cp README.md LICENSE SECURITY.md "$STAGE_DIR/"
+          tar -czf "${STAGE_DIR}.tar.gz" "$STAGE_DIR"
+          shasum -a 256 "${STAGE_DIR}.tar.gz" > "${STAGE_DIR}.tar.gz.sha256"
+
+      - name: Package versioned release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $StageDir = "rustrix-$env:RELEASE_TAG-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/rustrix.exe" "$StageDir/"
+          Copy-Item README.md, LICENSE, SECURITY.md "$StageDir/"
+          Compress-Archive -Path "$StageDir" -DestinationPath "$StageDir.zip" -Force
+          $Hash = (Get-FileHash -Algorithm SHA256 "$StageDir.zip").Hash.ToLower()
+          "$Hash  $StageDir.zip" | Out-File -Encoding ascii "$StageDir.zip.sha256"
+
+      - name: Attest build provenance for release archive
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "rustrix-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            rustrix-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}
+            rustrix-${{ env.RELEASE_TAG }}-${{ matrix.target }}.${{ matrix.archive_ext }}.sha256
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate combined SHA256SUMS
+        run: |
+          cd artifacts
+          cat *.sha256 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/SHA256SUMS
+            artifacts/*.sha256

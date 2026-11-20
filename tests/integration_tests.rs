@@ -71,8 +71,14 @@ fn test_select_where_order_by_limit() {
 
     assert_eq!(res.columns, vec!["id", "name", "salary"]);
     assert_eq!(res.rows.len(), 2);
-    assert_eq!(res.rows[0], vec![json!(5), json!("Elena Rostova"), json!(192000)]);
-    assert_eq!(res.rows[1], vec![json!(1), json!("Alice Vance"), json!(165000)]);
+    assert_eq!(
+        res.rows[0],
+        vec![json!(5), json!("Elena Rostova"), json!(192000)]
+    );
+    assert_eq!(
+        res.rows[1],
+        vec![json!(1), json!("Alice Vance"), json!(165000)]
+    );
 }
 
 #[test]
@@ -236,11 +242,21 @@ fn test_nested_dot_paths_and_array_unnesting() {
     assert_eq!(res_dot.rows.len(), 2);
     assert_eq!(
         res_dot.rows[0],
-        vec![json!("MS-PRO"), json!("Seattle"), json!(145), json!("ErgoMotion")]
+        vec![
+            json!("MS-PRO"),
+            json!("Seattle"),
+            json!(145),
+            json!("ErgoMotion")
+        ]
     );
     assert_eq!(
         res_dot.rows[1],
-        vec![json!("HD-NC"), json!("San Francisco"), json!(260), json!("AcoustiCore")]
+        vec![
+            json!("HD-NC"),
+            json!("San Francisco"),
+            json!(260),
+            json!("AcoustiCore")
+        ]
     );
 
     // 2. Lateral UNNEST in FROM clause on scalar array (`users.tags`)
@@ -254,9 +270,18 @@ fn test_nested_dot_paths_and_array_unnesting() {
         .unwrap();
 
     assert_eq!(res_unnest_from.rows.len(), 3);
-    assert_eq!(res_unnest_from.rows[0], vec![json!("Alice Vance"), json!("rust")]);
-    assert_eq!(res_unnest_from.rows[1], vec![json!("Bob Chen"), json!("rust")]);
-    assert_eq!(res_unnest_from.rows[2], vec![json!("Elena Rostova"), json!("rust")]);
+    assert_eq!(
+        res_unnest_from.rows[0],
+        vec![json!("Alice Vance"), json!("rust")]
+    );
+    assert_eq!(
+        res_unnest_from.rows[1],
+        vec![json!("Bob Chen"), json!("rust")]
+    );
+    assert_eq!(
+        res_unnest_from.rows[2],
+        vec![json!("Elena Rostova"), json!("rust")]
+    );
 
     // 3. Lateral UNNEST in FROM clause on array of objects (`orders.items`) + 3-table join!
     let res_unnest_objects = engine
@@ -291,7 +316,11 @@ fn test_nested_dot_paths_and_array_unnesting() {
     assert_eq!(res_inline_unnest.rows.len(), 4);
     assert_eq!(
         res_inline_unnest.rows[0],
-        vec![json!("Rustrix Labs"), json!("us-east-1"), json!("streaming")]
+        vec![
+            json!("Rustrix Labs"),
+            json!("us-east-1"),
+            json!("streaming")
+        ]
     );
     assert_eq!(
         res_inline_unnest.rows[3],
@@ -343,11 +372,7 @@ fn test_caching_and_source_files_remain_byte_identical() {
     // Verify all source files are 100% byte-identical after loading, caching, and querying
     for (p, before) in files.iter().zip(before_snapshots.iter()) {
         let after = fs::read(p).expect("read file after queries");
-        assert_eq!(
-            before, &after,
-            "Source file {} was modified!",
-            p
-        );
+        assert_eq!(before, &after, "Source file {} was modified!", p);
     }
 }
 
@@ -376,7 +401,16 @@ fn test_edge_cases_distinct_order_by_empty_result_and_having() {
     assert_eq!(res_empty.rows.len(), 0);
     assert_eq!(
         res_empty.columns,
-        vec!["id", "name", "role", "department", "salary", "active", "address", "tags"]
+        vec![
+            "id",
+            "name",
+            "role",
+            "department",
+            "salary",
+            "active",
+            "address",
+            "tags"
+        ]
     );
 
     // 3. GROUP BY with HAVING and COUNT(DISTINCT ...)
@@ -394,7 +428,8 @@ fn test_edge_cases_distinct_order_by_empty_result_and_having() {
     // 4. Default `FROM data` alias when only a single file is loaded
     let mut single_engine = QueryEngine::new();
     let (u_name, u_path) = parse_file_spec("examples/users.json");
-    single_engine.register_table(load_json_file(&u_name, &u_path, Some(tmp.path()), false).unwrap());
+    single_engine
+        .register_table(load_json_file(&u_name, &u_path, Some(tmp.path()), false).unwrap());
     let res_data = single_engine
         .execute("SELECT COUNT(*) AS cnt FROM data WHERE active = true")
         .unwrap();
@@ -411,3 +446,133 @@ fn test_edge_cases_distinct_order_by_empty_result_and_having() {
     assert_eq!(res_single.rows, res_double.rows);
 }
 
+#[test]
+fn test_security_arithmetic_overflow_and_division_by_zero() {
+    let tmp = TempDir::new().unwrap();
+    let json_path = tmp.path().join("extreme_nums.json");
+    let payload = serde_json::json!([
+        {
+            "id": 1,
+            "max_i64": i64::MAX,
+            "min_i64": i64::MIN,
+            "zero": 0,
+            "neg_one": -1
+        },
+        {
+            "id": 2,
+            "max_i64": i64::MAX,
+            "min_i64": i64::MIN,
+            "zero": 0,
+            "neg_one": -1
+        }
+    ]);
+    fs::write(&json_path, serde_json::to_string(&payload).unwrap()).unwrap();
+
+    let mut engine = QueryEngine::new();
+    let table = load_json_file("extreme_nums", &json_path, Some(tmp.path()), false).unwrap();
+    engine.register_table(table);
+
+    // Verify i64::MAX + 1, i64::MIN - 1, i64::MAX * 2, -i64::MIN, ABS(i64::MIN), i64::MIN % -1, and % 0 never panic
+    let res = engine
+        .execute(
+            "SELECT \
+                max_i64 + 1 AS add_overflow, \
+                min_i64 - 1 AS sub_overflow, \
+                max_i64 * 2 AS mul_overflow, \
+                -min_i64 AS neg_min, \
+                ABS(min_i64) AS abs_min, \
+                min_i64 % neg_one AS rem_overflow, \
+                max_i64 % zero AS mod_zero, \
+                max_i64 / zero AS div_zero \
+             FROM extreme_nums \
+             LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(res.rows.len(), 1);
+    let row = &res.rows[0];
+    assert!(row[0].as_f64().unwrap() > 9e18);
+    assert!(row[1].as_f64().unwrap() < -9e18);
+    assert!(row[2].as_f64().unwrap() > 1.8e19);
+    assert!(row[3].as_f64().unwrap() > 9e18);
+    assert!(row[4].as_f64().unwrap() > 9e18);
+    assert_eq!(row[5], json!(0));
+    assert_eq!(row[6], Value::Null);
+    assert_eq!(row[7], Value::Null);
+
+    // Verify SUM overflow across rows promotes cleanly to f64 instead of saturating or panicking
+    let sum_res = engine
+        .execute("SELECT SUM(max_i64) AS total FROM extreme_nums")
+        .unwrap();
+    assert!(sum_res.rows[0][0].as_f64().unwrap() > 1.8e19);
+}
+
+#[test]
+fn test_security_terminal_ansi_escape_sanitization() {
+    use rustrix::cli::sanitize_terminal_text;
+
+    let malicious = "hello\x1b[31mRED\x1b]52;c;dGVzdA==\x07\nworld";
+    let safe = sanitize_terminal_text(malicious);
+    assert!(!safe.contains('\x1b'));
+    assert!(!safe.contains('\x07'));
+    assert!(!safe.contains('\n'));
+    assert!(safe.contains("\\x1b[31mRED"));
+
+    let tmp = TempDir::new().unwrap();
+    let json_path = tmp.path().join("untrusted.json");
+    fs::write(
+        &json_path,
+        r#"[{"id": 1, "payload": "safe\u001b[2J\u0007text\nline2"}]"#,
+    )
+    .unwrap();
+
+    let mut engine = QueryEngine::new();
+    engine.register_table(load_json_file("untrusted", &json_path, None, true).unwrap());
+    let res = engine.execute("SELECT * FROM untrusted").unwrap();
+    let table_str = format_query_result(&res, OutputFormat::Table);
+    assert!(
+        !table_str.contains('\x1b') && !table_str.contains('\x07'),
+        "Table output must not emit raw ANSI escape or BEL control bytes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_security_cache_permissions_and_symlink_rejection() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let tmp = TempDir::new().unwrap();
+    let cache_dir = tmp.path().join("secure_cache");
+    let (name, path) = parse_file_spec("examples/users.json");
+
+    let loaded = load_json_file(&name, &path, Some(&cache_dir), false).unwrap();
+    assert!(!loaded.loaded_from_cache);
+
+    // 1. Verify cache_dir has 0o700 owner-only permissions
+    let dir_mode = fs::metadata(&cache_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        dir_mode, 0o700,
+        "Cache directory must have 0700 permissions"
+    );
+
+    // 2. Verify cached files have 0o600 owner-only permissions
+    for entry in fs::read_dir(&cache_dir).unwrap() {
+        let entry = entry.unwrap();
+        let file_mode = entry.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "Cache file must have 0600 permissions");
+    }
+
+    // 3. Verify symlinked cache directory is rejected for reading/writing (falls back to direct load without writing through symlink)
+    let target_dir = tmp.path().join("real_target");
+    fs::create_dir_all(&target_dir).unwrap();
+    let symlink_cache = tmp.path().join("symlink_cache");
+    symlink(&target_dir, &symlink_cache).unwrap();
+
+    let loaded_via_symlink = load_json_file(&name, &path, Some(&symlink_cache), false).unwrap();
+    assert!(!loaded_via_symlink.loaded_from_cache);
+    assert_eq!(
+        fs::read_dir(&target_dir).unwrap().count(),
+        0,
+        "Must not write cache files through a symlinked cache directory"
+    );
+}
