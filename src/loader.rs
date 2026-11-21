@@ -551,91 +551,90 @@ pub fn load_json_file(
         source: e,
     })?;
 
-    let (shape, rows) = match first_b {
-        b'[' => {
-            // Stream-parse top-level array
-            let reader = BufReader::with_capacity(256 * 1024, file);
-            let parsed_rows = stream_parse_top_level_array(reader, &path_label)?;
-            (JsonShape::TopLevelArray, parsed_rows)
-        }
-        b'{' => {
-            // Check if the first line is a complete JSON object followed by another line starting with '{'
-            let mut reader = BufReader::with_capacity(256 * 1024, file);
-            let mut first_line = Vec::new();
-            loop {
-                first_line.clear();
-                let n = read_bounded_line(&mut reader, &mut first_line, MAX_NDJSON_LINE_BYTES)
-                    .map_err(|e| LoaderError::Io {
-                        path: path_label.clone(),
-                        source: e,
-                    })?;
-                if n == 0 || !trim_ascii_whitespace(&first_line).is_empty() {
-                    break;
-                }
+    let (shape, rows) =
+        match first_b {
+            b'[' => {
+                // Stream-parse top-level array
+                let reader = BufReader::with_capacity(256 * 1024, file);
+                let parsed_rows = stream_parse_top_level_array(reader, &path_label)?;
+                (JsonShape::TopLevelArray, parsed_rows)
             }
-
-            let first_line_trimmed = trim_ascii_whitespace(&first_line);
-            let first_line_val: Result<Value, _> = serde_json::from_slice(first_line_trimmed);
-            let mut second_line = Vec::new();
-            loop {
-                second_line.clear();
-                let n = read_bounded_line(&mut reader, &mut second_line, MAX_NDJSON_LINE_BYTES)
-                    .map_err(|e| LoaderError::Io {
-                        path: path_label.clone(),
-                        source: e,
-                    })?;
-                if n == 0 || !trim_ascii_whitespace(&second_line).is_empty() {
-                    break;
+            b'{' => {
+                // Check if the first line is a complete JSON object followed by another line starting with '{'
+                let mut reader = BufReader::with_capacity(256 * 1024, file);
+                let mut first_line = Vec::new();
+                loop {
+                    first_line.clear();
+                    let n = read_bounded_line(&mut reader, &mut first_line, MAX_NDJSON_LINE_BYTES)
+                        .map_err(|e| LoaderError::Io {
+                            path: path_label.clone(),
+                            source: e,
+                        })?;
+                    if n == 0 || !trim_ascii_whitespace(&first_line).is_empty() {
+                        break;
+                    }
                 }
-            }
 
-            if let Ok(first_obj) = first_line_val {
-                let second_line_trimmed = trim_ascii_whitespace(&second_line);
-                if !second_line_trimmed.is_empty() {
-                    // Validate second line is also valid JSON -> NDJSON stream!
-                    let second_obj: Value =
-                        serde_json::from_slice(second_line_trimmed).map_err(|e| {
-                            LoaderError::JsonParse {
+                let first_line_trimmed = trim_ascii_whitespace(&first_line);
+                let first_line_val: Result<Value, _> = serde_json::from_slice(first_line_trimmed);
+                let mut second_line = Vec::new();
+                loop {
+                    second_line.clear();
+                    let n = read_bounded_line(&mut reader, &mut second_line, MAX_NDJSON_LINE_BYTES)
+                        .map_err(|e| LoaderError::Io {
+                            path: path_label.clone(),
+                            source: e,
+                        })?;
+                    if n == 0 || !trim_ascii_whitespace(&second_line).is_empty() {
+                        break;
+                    }
+                }
+
+                if let Ok(first_obj) = first_line_val {
+                    let second_line_trimmed = trim_ascii_whitespace(&second_line);
+                    if !second_line_trimmed.is_empty() {
+                        // Validate second line is also valid JSON -> NDJSON stream!
+                        let second_obj: Value = serde_json::from_slice(second_line_trimmed)
+                            .map_err(|e| LoaderError::JsonParse {
                                 path: path_label.clone(),
                                 message: format!("Line 2: {}", e),
-                            }
-                        })?;
-                    let mut rows = Vec::new();
-                    rows.push(value_to_row_map(first_obj));
-                    rows.push(value_to_row_map(second_obj));
-                    let rest = stream_parse_ndjson(reader, &path_label)?;
-                    rows.extend(rest);
-                    (JsonShape::Ndjson, rows)
+                            })?;
+                        let mut rows = Vec::new();
+                        rows.push(value_to_row_map(first_obj));
+                        rows.push(value_to_row_map(second_obj));
+                        let rest = stream_parse_ndjson(reader, &path_label)?;
+                        rows.extend(rest);
+                        (JsonShape::Ndjson, rows)
+                    } else {
+                        // Single line, single object
+                        extract_from_single_object(first_obj, &path_label)?
+                    }
                 } else {
-                    // Single line, single object
-                    extract_from_single_object(first_obj, &path_label)?
-                }
-            } else {
-                // Multi-line JSON object (or multi-line stream of objects)
-                let mut file_reopen = File::open(path).map_err(|e| LoaderError::Io {
-                    path: path_label.clone(),
-                    source: e,
-                })?;
-                let mut content = String::new();
-                file_reopen
-                    .read_to_string(&mut content)
-                    .map_err(|e| LoaderError::Io {
+                    // Multi-line JSON object (or multi-line stream of objects)
+                    let mut file_reopen = File::open(path).map_err(|e| LoaderError::Io {
                         path: path_label.clone(),
                         source: e,
                     })?;
-                parse_json_str(&content, &path_label)?
+                    let mut content = String::new();
+                    file_reopen
+                        .read_to_string(&mut content)
+                        .map_err(|e| LoaderError::Io {
+                            path: path_label.clone(),
+                            source: e,
+                        })?;
+                    parse_json_str(&content, &path_label)?
+                }
             }
-        }
-        _ => {
-            return Err(LoaderError::UnsupportedShape {
-                path: path_label,
-                reason: format!(
-                    "Top-level JSON primitive starting with '{}' is not supported as a table",
-                    first_b as char
-                ),
-            });
-        }
-    };
+            _ => {
+                return Err(LoaderError::UnsupportedShape {
+                    path: path_label,
+                    reason: format!(
+                        "Top-level JSON primitive starting with '{}' is not supported as a table",
+                        first_b as char
+                    ),
+                });
+            }
+        };
 
     // Write normalized NDJSON cache for fast subsequent loads (e.g. top-level arrays or nested objects).
     // Skip re-serializing large (> 1 MB) files that are already in NDJSON format on disk.
@@ -1086,7 +1085,8 @@ mod tests {
 
     #[test]
     fn test_ndjson_multibyte_utf8_across_chunk_boundary() {
-        let data = "{\"id\": 1, \"text\": \"hello 🦀 world\"}\n{\"id\": 2, \"text\": \"second line\"}\n";
+        let data =
+            "{\"id\": 1, \"text\": \"hello 🦀 world\"}\n{\"id\": 2, \"text\": \"second line\"}\n";
         let reader = BufReader::with_capacity(16, data.as_bytes());
         let rows = stream_parse_ndjson(reader, "test.ndjson")
             .expect("should stream parse without UTF-8 boundary error");
