@@ -68,9 +68,6 @@ if (-not $Version.StartsWith("v")) {
 }
 
 $Target = "x86_64-pc-windows-msvc"
-$ArchiveName = "rustql-$Version-$Target.zip"
-$DownloadUrl = "$GitHubUrl/releases/download/$Version/$ArchiveName"
-$ShaUrl = "$DownloadUrl.sha256"
 
 Write-Info "Installing RustQL $Version ($Target)..."
 
@@ -86,11 +83,35 @@ if (-not (Test-Path -Path $InstallDir)) {
 # 4. Download Release Archive to Temp
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rustql_install_" + [System.Guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
-$ZipPath = Join-Path $TempDir $ArchiveName
+
+$CandidateArchives = @(
+    "rustql-$Version-$Target.zip",
+    "rustrix-$Version-$Target.zip"
+)
+
+$Downloaded = $false
+$DownloadedArchive = ""
+$ZipPath = ""
 
 try {
-    Write-Info "Downloading $ArchiveName..."
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $ZipPath -UseBasicParsing
+    foreach ($ArchiveName in $CandidateArchives) {
+        $DownloadUrl = "$GitHubUrl/releases/download/$Version/$ArchiveName"
+        $CurrentZipPath = Join-Path $TempDir $ArchiveName
+        try {
+            Write-Info "Attempting download: $ArchiveName..."
+            Invoke-WebRequest -Uri $DownloadUrl -OutFile $CurrentZipPath -UseBasicParsing
+            $Downloaded = $true
+            $DownloadedArchive = $ArchiveName
+            $ZipPath = $CurrentZipPath
+            break
+        } catch {
+            # Try next candidate
+        }
+    }
+
+    if (-not $Downloaded) {
+        Write-ErrMsg "Failed to download release archive for $Version from $GitHubUrl/releases."
+    }
 
     # 5. Prevent Windows SmartScreen / Mark-of-the-Web Warnings: Unblock archive
     if (Get-Command -Name Unblock-File -ErrorAction SilentlyContinue) {
@@ -98,6 +119,7 @@ try {
     }
 
     # Verify SHA256 if available
+    $ShaUrl = "$GitHubUrl/releases/download/$Version/$DownloadedArchive.sha256"
     try {
         $ExpectedShaRaw = (Invoke-WebRequest -Uri $ShaUrl -UseBasicParsing).Content.Trim()
         $ExpectedHash = ($ExpectedShaRaw -split '\s+')[0].ToLower()
@@ -105,7 +127,7 @@ try {
         if ($ExpectedHash -and ($ActualHash -ne $ExpectedHash)) {
             Write-ErrMsg "SHA256 checksum mismatch! Expected: $ExpectedHash, Got: $ActualHash"
         }
-        Write-Info "SHA256 checksum verified."
+        Write-Info "SHA256 checksum verified ($ExpectedHash)."
     } catch {
         # SHA verification is best-effort
     }
@@ -114,13 +136,28 @@ try {
     Write-Info "Extracting binary..."
     Expand-Archive -Path $ZipPath -DestinationPath $TempDir -Force
 
-    $ExtractedBin = Join-Path $TempDir "rustql-$Version-$Target\rustql.exe"
-    if (-not (Test-Path -Path $ExtractedBin)) {
-        $ExtractedBin = Join-Path $TempDir "rustql.exe"
+    $ExtractedBin = $null
+    $BinCandidates = @(
+        (Join-Path $TempDir "rustql-$Version-$Target\rustql.exe"),
+        (Join-Path $TempDir "rustrix-$Version-$Target\rustrix.exe"),
+        (Join-Path $TempDir "rustql.exe"),
+        (Join-Path $TempDir "rustrix.exe")
+    )
+    foreach ($cand in $BinCandidates) {
+        if (Test-Path -Path $cand) {
+            $ExtractedBin = $cand
+            break
+        }
+    }
+    if (-not $ExtractedBin) {
+        $found = Get-ChildItem -Path $TempDir -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "^rust(ql|rix)\.exe$" } | Select-Object -First 1
+        if ($found) {
+            $ExtractedBin = $found.FullName
+        }
     }
 
-    if (-not (Test-Path -Path $ExtractedBin)) {
-        Write-ErrMsg "Could not find rustql.exe in extracted archive."
+    if (-not $ExtractedBin) {
+        Write-ErrMsg "Could not find rustql.exe or rustrix.exe in extracted archive."
     }
 
     # 7. Copy to Target Directory and Unblock
