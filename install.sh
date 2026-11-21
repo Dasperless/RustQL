@@ -38,6 +38,15 @@ error() {
     exit 1
 }
 
+# Pre-flight requirement checks
+if ! command -v curl >/dev/null 2>&1; then
+    error "curl is required to download RustQL releases."
+fi
+
+if ! command -v tar >/dev/null 2>&1; then
+    error "tar is required to extract RustQL releases."
+fi
+
 # 1. Detect OS and Architecture
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -50,7 +59,7 @@ case "$OS" in
                 FALLBACK_TARGET="x86_64-unknown-linux-gnu"
                 ;;
             *)
-                error "Unsupported Linux architecture: $ARCH (currently x86_64 is prebuilt; build from source using 'cargo build --release')"
+                error "Unsupported Linux architecture: $ARCH (currently x86_64 is prebuilt; build from source using 'cargo build --release' or 'cargo install --path .')"
                 ;;
         esac
         ;;
@@ -58,9 +67,11 @@ case "$OS" in
         case "$ARCH" in
             arm64|aarch64)
                 TARGET="aarch64-apple-darwin"
+                FALLBACK_TARGET=""
                 ;;
             x86_64)
                 TARGET="x86_64-apple-darwin"
+                FALLBACK_TARGET=""
                 ;;
             *)
                 error "Unsupported macOS architecture: $ARCH"
@@ -94,7 +105,7 @@ info "Installing RustQL ${VERSION} (${TARGET})..."
 
 # 3. Determine Installation Directory
 if [ -z "${BIN_DIR:-}" ]; then
-    if [ "$(id -u)" -eq 0 ] || [ -w "/usr/local/bin" ]; then
+    if [ "$(id -u)" -eq 0 ] || ([ -d "/usr/local/bin" ] && [ -w "/usr/local/bin" ]); then
         BIN_DIR="/usr/local/bin"
     else
         BIN_DIR="${HOME}/.local/bin"
@@ -110,53 +121,89 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ARCHIVE_NAME="rustql-${VERSION}-${TARGET}.tar.gz"
-DOWNLOAD_URL="${GITHUB_URL}/releases/download/${VERSION}/${ARCHIVE_NAME}"
-SHA_URL="${DOWNLOAD_URL}.sha256"
+# Candidate archive names in priority order:
+# 1. rustql target
+# 2. rustql fallback target
+# 3. rustrix target (backward compatibility with v0.1.0 release naming)
+# 4. rustrix fallback target
+CANDIDATES=("rustql-${VERSION}-${TARGET}.tar.gz")
+if [ -n "${FALLBACK_TARGET:-}" ]; then
+    CANDIDATES+=("rustql-${VERSION}-${FALLBACK_TARGET}.tar.gz")
+fi
+CANDIDATES+=("rustrix-${VERSION}-${TARGET}.tar.gz")
+if [ -n "${FALLBACK_TARGET:-}" ]; then
+    CANDIDATES+=("rustrix-${VERSION}-${FALLBACK_TARGET}.tar.gz")
+fi
 
-info "Downloading ${ARCHIVE_NAME}..."
-if ! curl -fsSL "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ARCHIVE_NAME}"; then
-    if [ -n "${FALLBACK_TARGET:-}" ]; then
-        info "Trying target variant: ${FALLBACK_TARGET}..."
-        TARGET="$FALLBACK_TARGET"
-        ARCHIVE_NAME="rustql-${VERSION}-${TARGET}.tar.gz"
-        DOWNLOAD_URL="${GITHUB_URL}/releases/download/${VERSION}/${ARCHIVE_NAME}"
-        SHA_URL="${DOWNLOAD_URL}.sha256"
-        curl -fsSL "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ARCHIVE_NAME}" || error "Failed to download release archive from: ${DOWNLOAD_URL}"
-    else
-        error "Failed to download release archive from: ${DOWNLOAD_URL}"
+DOWNLOADED=false
+DOWNLOADED_ARCHIVE=""
+
+for ARCHIVE in "${CANDIDATES[@]}"; do
+    DOWNLOAD_URL="${GITHUB_URL}/releases/download/${VERSION}/${ARCHIVE}"
+    info "Attempting download: ${ARCHIVE}..."
+    if curl -fsSL "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ARCHIVE}" 2>/dev/null; then
+        DOWNLOADED=true
+        DOWNLOADED_ARCHIVE="$ARCHIVE"
+        break
     fi
+done
+
+if [ "$DOWNLOADED" = false ]; then
+    error "Failed to download release archive from ${GITHUB_URL}/releases/tag/${VERSION}"
 fi
 
 # 5. Checksum Verification (if sha256 tool available)
-if curl -fsSL "$SHA_URL" -o "${TEMP_DIR}/${ARCHIVE_NAME}.sha256" 2>/dev/null; then
+SHA_URL="${GITHUB_URL}/releases/download/${VERSION}/${DOWNLOADED_ARCHIVE}.sha256"
+if curl -fsSL "$SHA_URL" -o "${TEMP_DIR}/${DOWNLOADED_ARCHIVE}.sha256" 2>/dev/null; then
     info "Verifying SHA256 checksum..."
-    cd "$TEMP_DIR"
+    EXPECTED_HASH="$(awk '{print $1}' "${TEMP_DIR}/${DOWNLOADED_ARCHIVE}.sha256" | tr -d '\r\n')"
+    ACTUAL_HASH=""
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum -c "${ARCHIVE_NAME}.sha256" --status || error "SHA256 checksum verification failed!"
+        ACTUAL_HASH="$(sha256sum "${TEMP_DIR}/${DOWNLOADED_ARCHIVE}" | awk '{print $1}')"
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 -c "${ARCHIVE_NAME}.sha256" --status || error "SHA256 checksum verification failed!"
+        ACTUAL_HASH="$(shasum -a 256 "${TEMP_DIR}/${DOWNLOADED_ARCHIVE}" | awk '{print $1}')"
     fi
-    cd - >/dev/null
+
+    if [ -n "$ACTUAL_HASH" ] && [ -n "$EXPECTED_HASH" ]; then
+        if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+            error "SHA256 checksum verification failed!"
+        fi
+        success "Checksum verified (${EXPECTED_HASH})"
+    fi
 fi
 
 # 6. Extract and Install
 info "Extracting binary..."
-tar -xzf "${TEMP_DIR}/${ARCHIVE_NAME}" -C "$TEMP_DIR"
+tar -xzf "${TEMP_DIR}/${DOWNLOADED_ARCHIVE}" -C "$TEMP_DIR"
 
-SRC_BIN="${TEMP_DIR}/rustql-${VERSION}-${TARGET}/rustql"
-if [ ! -f "$SRC_BIN" ]; then
-    # In case archive root is flat
-    SRC_BIN="${TEMP_DIR}/rustql"
-fi
+SRC_BIN=""
+for candidate in \
+    "${TEMP_DIR}"/*/rustql \
+    "${TEMP_DIR}/rustql" \
+    "${TEMP_DIR}"/*/rustrix \
+    "${TEMP_DIR}/rustrix"; do
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+        SRC_BIN="$candidate"
+        break
+    fi
+done
 
-if [ ! -f "$SRC_BIN" ]; then
-    error "Compiled binary 'rustql' not found in release archive."
+if [ -z "$SRC_BIN" ] || [ ! -f "$SRC_BIN" ]; then
+    error "Compiled binary ('rustql' or 'rustrix') not found in release archive."
 fi
 
 DEST_BIN="${BIN_DIR}/rustql"
-cp "$SRC_BIN" "$DEST_BIN"
-chmod +x "$DEST_BIN"
+if ! cp "$SRC_BIN" "$DEST_BIN" 2>/dev/null; then
+    if command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
+        warn "Permission denied copying to ${DEST_BIN}. Attempting with sudo..."
+        sudo cp "$SRC_BIN" "$DEST_BIN"
+        sudo chmod +x "$DEST_BIN"
+    else
+        error "Permission denied copying to ${DEST_BIN}. Try setting BIN_DIR=\"\${HOME}/.local/bin\" or running with sudo."
+    fi
+else
+    chmod +x "$DEST_BIN"
+fi
 
 # 7. Post-install macOS quarantine clearance
 if [ "$OS" = "Darwin" ]; then
@@ -179,7 +226,7 @@ case ":${PATH}:" in
 esac
 
 # 9. Verify Installation
-if command -v "$DEST_BIN" >/dev/null 2>&1; then
+if [ -x "$DEST_BIN" ]; then
     "$DEST_BIN" --version
 fi
 

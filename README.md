@@ -146,12 +146,21 @@ Both backslashes (`examples\users.json`) and forward slashes (`examples/users.js
 ### 4. Linux & macOS Setup Guide
 
 #### Linux Setup
-1. Run the one-line installer:
+1. **Automated One-Line Installer**:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/Dasperless/RustQL/main/install.sh | bash
    ```
-2. Or extract manually and copy to `/usr/local/bin` or `~/.local/bin`:
+   *Auto-detects CPU architecture, verifies SHA256 checksum, installs to `~/.local/bin` (or `/usr/local/bin` if root), and verifies PATH.*
+
+2. **Manual Prebuilt Binary Installation**:
    ```bash
+   # Static binary (zero glibc dependency, works on Alpine, Debian, Ubuntu, Arch, RHEL, etc.):
+   tar -xzf rustql-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+   sudo install -m 755 rustql-v0.1.0-x86_64-unknown-linux-musl/rustql /usr/local/bin/
+   # Or install without sudo to ~/.local/bin:
+   install -m 755 rustql-v0.1.0-x86_64-unknown-linux-musl/rustql ~/.local/bin/
+
+   # Or dynamic glibc binary:
    tar -xzf rustql-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
    sudo install -m 755 rustql-v0.1.0-x86_64-unknown-linux-gnu/rustql /usr/local/bin/
    ```
@@ -197,6 +206,9 @@ cargo build --release
 
 # Binary is placed at:
 ./target/release/rustql --version
+
+# Or install directly into ~/.cargo/bin:
+cargo install --locked --path .
 ```
 
 Run the full test suite:

@@ -6,7 +6,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/Dasperless/RustQL/releases/download/v0.1.0/rustql-v0.1.0-x86_64-pc-windows-msvc.zip",
-            "hash": "94bf56af6dfcd248e6372910f0bd5a2fc4108e537708ee93fd8ebbbe41eb7da6",
+            "hash": "5206e47cd2dde3db3cd426baa5def45937053e47c25564717b36e583bfca1f4a",
             "extract_dir": "rustql-v0.1.0-x86_64-pc-windows-msvc"
         }
     },
