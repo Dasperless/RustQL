@@ -587,9 +587,6 @@ impl TuiApp {
                 if col_count > 0 && self.selected_col + 1 < col_count =>
             {
                 self.selected_col += 1;
-                if self.selected_col >= self.col_scroll_offset + 6 {
-                    self.col_scroll_offset = self.selected_col.saturating_sub(5);
-                }
                 self.detail_cursor_line = 0;
                 self.detail_scroll_offset = 0;
             }
@@ -996,9 +993,6 @@ impl TuiApp {
             KeyCode::Right | KeyCode::Char('l') => {
                 if col_count > 0 && self.selected_col + 1 < col_count {
                     self.selected_col += 1;
-                    if self.selected_col >= self.col_scroll_offset + 6 {
-                        self.col_scroll_offset = self.selected_col.saturating_sub(5);
-                    }
                 }
             }
             KeyCode::Left | KeyCode::Char('h') => {
@@ -1486,8 +1480,99 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
     };
 
     let total_cols = res.columns.len();
+    app.selected_col = app.selected_col.min(total_cols.saturating_sub(1));
+
+    // Virtual window calculations: only construct widget rows for what fits on screen
+    let total_vis_rows = app.visible_row_indices.len();
+    let visible_capacity = (area.height.saturating_sub(4) as usize).max(1);
+
+    if total_vis_rows > 0 {
+        app.selected_row = app.selected_row.min(total_vis_rows - 1);
+    } else {
+        app.selected_row = 0;
+    }
+
+    if app.selected_row < app.row_scroll_offset {
+        app.row_scroll_offset = app.selected_row;
+    } else if app.selected_row >= app.row_scroll_offset + visible_capacity {
+        app.row_scroll_offset = app.selected_row.saturating_sub(visible_capacity - 1);
+    }
+
+    let start_row = app.row_scroll_offset.min(total_vis_rows);
+    let end_row = (start_row + visible_capacity).min(total_vis_rows);
+    let window_row_indices = &app.visible_row_indices[start_row..end_row];
+
+    // Helper to compute the display width (clamped to 8..=36) of a single column over visible rows,
+    // memoized per frame so we never re-scan window rows for the same column twice.
+    let mut cached_col_widths: Vec<Option<u16>> = vec![None; total_cols];
+    let mut col_display_width = |col_idx: usize| -> u16 {
+        if let Some(w) = cached_col_widths[col_idx] {
+            return w;
+        }
+        let col_name = &res.columns[col_idx];
+        let mut max_w = col_name.chars().count() + 3;
+        for &r_idx in window_row_indices {
+            if let Some(val) = res.rows[r_idx].get(col_idx) {
+                let len = value_to_table_cell_string(val).chars().count();
+                if len > max_w {
+                    max_w = len;
+                }
+            }
+        }
+        let w = max_w.clamp(8, 36) as u16;
+        cached_col_widths[col_idx] = Some(w);
+        w
+    };
+
+    // Available inner width for columns (subtract 2 for block borders and 2 for highlight_symbol "▶ ")
+    let avail_table_width = area.width.saturating_sub(4).max(8);
+
+    // Ensure col_scroll_offset is positioned so that selected_col is visible inside the horizontal viewport
+    if app.selected_col < app.col_scroll_offset {
+        app.col_scroll_offset = app.selected_col;
+    } else {
+        // Walk backwards from selected_col to find the earliest start_col that still fits selected_col on screen
+        let mut needed_width = col_display_width(app.selected_col);
+        let mut min_start = app.selected_col;
+        while min_start > app.col_scroll_offset {
+            let prev_w = col_display_width(min_start - 1) + 1; // +1 for column spacing
+            if needed_width + prev_w > avail_table_width {
+                break;
+            }
+            needed_width += prev_w;
+            min_start -= 1;
+        }
+        if app.col_scroll_offset < min_start {
+            app.col_scroll_offset = min_start;
+        }
+    }
+
     let start_col = app.col_scroll_offset.min(total_cols.saturating_sub(1));
-    let visible_cols_slice = &res.columns[start_col..];
+
+    // Only pass columns that fit within the horizontal viewport (plus at most 1 partially visible trailing column)
+    // so Ratatui's Cassowary layout solver never squeezes columns to 0 width when tables have 150+ columns.
+    let mut constraints = Vec::new();
+    let mut used_width = 0u16;
+    let mut end_col = start_col;
+    for col_idx in start_col..total_cols {
+        let w = col_display_width(col_idx);
+        let spacing = if constraints.is_empty() { 0 } else { 1 };
+        if !constraints.is_empty() && used_width + spacing >= avail_table_width {
+            break;
+        }
+        constraints.push(Constraint::Length(w));
+        used_width = used_width.saturating_add(w + spacing);
+        end_col = col_idx + 1;
+        if used_width >= avail_table_width {
+            break;
+        }
+    }
+    if end_col <= start_col && start_col < total_cols {
+        constraints.push(Constraint::Length(col_display_width(start_col)));
+        end_col = start_col + 1;
+    }
+
+    let visible_cols_slice = &res.columns[start_col..end_col];
 
     let header_cells = visible_cols_slice
         .iter()
@@ -1515,33 +1600,13 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
 
     let header = Row::new(header_cells).height(1).bottom_margin(1);
 
-    // Virtual window calculations: only construct widget rows for what fits on screen
-    let total_vis_rows = app.visible_row_indices.len();
-    let visible_capacity = (area.height.saturating_sub(4) as usize).max(1);
-
-    if total_vis_rows > 0 {
-        app.selected_row = app.selected_row.min(total_vis_rows - 1);
-    } else {
-        app.selected_row = 0;
-    }
-
-    if app.selected_row < app.row_scroll_offset {
-        app.row_scroll_offset = app.selected_row;
-    } else if app.selected_row >= app.row_scroll_offset + visible_capacity {
-        app.row_scroll_offset = app.selected_row.saturating_sub(visible_capacity - 1);
-    }
-
-    let start_row = app.row_scroll_offset.min(total_vis_rows);
-    let end_row = (start_row + visible_capacity).min(total_vis_rows);
-    let window_row_indices = &app.visible_row_indices[start_row..end_row];
-
     let rows = window_row_indices
         .iter()
         .enumerate()
         .map(|(win_idx, &r_idx)| {
             let is_selected_row = start_row + win_idx == app.selected_row;
             let row_data = &res.rows[r_idx];
-            let cells = (start_col..total_cols).map(|c_idx| {
+            let cells = (start_col..end_col).map(|c_idx| {
                 let val = row_data.get(c_idx).unwrap_or(&Value::Null);
                 let is_selected_col = c_idx == app.selected_col;
                 let is_active_cell = is_selected_row && is_selected_col;
@@ -1549,23 +1614,6 @@ fn draw_result_table(frame: &mut Frame, app: &mut TuiApp, area: Rect) {
             });
             Row::new(cells).height(1)
         });
-
-    // Compute dynamic column widths over visible window rows only (instantaneous)
-    let num_vis_cols = visible_cols_slice.len().max(1);
-    let mut constraints = Vec::with_capacity(num_vis_cols);
-    for (offset, col_name) in visible_cols_slice.iter().enumerate() {
-        let actual_col = start_col + offset;
-        let mut max_w = col_name.chars().count() + 3;
-        for &r_idx in window_row_indices {
-            if let Some(val) = res.rows[r_idx].get(actual_col) {
-                let len = value_to_table_cell_string(val).chars().count();
-                if len > max_w {
-                    max_w = len;
-                }
-            }
-        }
-        constraints.push(Constraint::Length(max_w.clamp(8, 36) as u16));
-    }
 
     let filter_badge = if app.filter_input.is_empty() {
         String::new()
@@ -3296,6 +3344,94 @@ mod tests {
             schema_text.iter().any(|l| l.contains("[autofixed:")),
             "Expected [autofixed: N] badge in TUI schema browser, got: {:?}",
             schema_text
+        );
+    }
+
+    #[test]
+    fn test_tui_wide_table_150_plus_columns_renders_at_start() {
+        let mut engine = QueryEngine::new();
+        let col_count = 160;
+        let mut columns = Vec::with_capacity(col_count);
+        let mut row0 = serde_json::Map::new();
+        let mut row1 = serde_json::Map::new();
+
+        for c in 0..col_count {
+            let col_name = format!("col_{:03}", c);
+            if c == 1 {
+                // Include a column containing a list of JSON objects
+                row0.insert(
+                    col_name.clone(),
+                    serde_json::json!([{"k": "v1"}, {"k": "v2"}]),
+                );
+                row1.insert(col_name.clone(), serde_json::json!([{"k": "v3"}]));
+            } else {
+                row0.insert(
+                    col_name.clone(),
+                    serde_json::Value::from(format!("val_r0_c{:03}", c)),
+                );
+                row1.insert(
+                    col_name.clone(),
+                    serde_json::Value::from(format!("val_r1_c{:03}", c)),
+                );
+            }
+            columns.push(col_name);
+        }
+
+        let table = crate::loader::LoadedTable {
+            name: "wide_table".to_string(),
+            source_path: std::path::PathBuf::from("/tmp/wide_table.json"),
+            shape: crate::loader::JsonShape::TopLevelArray,
+            schema_fields: Vec::new(),
+            rows: std::sync::Arc::new(vec![row0, row1]),
+            columns,
+            loaded_from_cache: false,
+            autofixed_count: 0,
+        };
+        engine.register_table(table);
+
+        let mut app = TuiApp::new(engine);
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Render initial frame at col_scroll_offset == 0 with 160 columns
+        terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+
+        let buffer_to_string = |term: &Terminal<TestBackend>| -> String {
+            let buf = term.backend().buffer();
+            let mut s = String::new();
+            for y in 0..buf.area.height {
+                for x in 0..buf.area.width {
+                    s.push_str(buf[(x, y)].symbol());
+                }
+                s.push('\n');
+            }
+            s
+        };
+
+        let screen = buffer_to_string(&terminal);
+        assert!(
+            screen.contains("col_000") && screen.contains("val_r0_c000"),
+            "Expected initial columns and cell values to be visible on startup with 160 columns, got screen:\n{}",
+            screen
+        );
+        assert!(
+            screen.contains("col_001") && screen.contains("[{\"k\":\"v1\"}"),
+            "Expected JSON array column col_001 to be visible on startup, got screen:\n{}",
+            screen
+        );
+
+        // Scroll right 20 columns and verify the viewport scrolls smoothly to reveal col_020
+        for _ in 0..20 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+            terminal.draw(|f| draw_tui(f, &mut app)).unwrap();
+        }
+        assert_eq!(app.selected_col, 20);
+        assert!(app.col_scroll_offset > 0);
+        let screen_scrolled = buffer_to_string(&terminal);
+        assert!(
+            screen_scrolled.contains("col_020") && screen_scrolled.contains("val_r0_c020"),
+            "Expected col_020 and its data to be visible after scrolling right, got:\n{}",
+            screen_scrolled
         );
     }
 }
