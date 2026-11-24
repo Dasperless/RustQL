@@ -572,3 +572,141 @@ fn test_security_cache_permissions_and_symlink_rejection() {
         "Must not write cache files through a symlinked cache directory"
     );
 }
+
+#[test]
+fn test_autofix_json_files_read_only_cache_and_cli() {
+    use rustql::loader::load_json_file_with_options;
+    use std::process::Command;
+
+    let tmp = TempDir::new().unwrap();
+    let cache_dir = tmp.path().join("cache");
+    let broken_path = tmp.path().join("broken_events.json");
+
+    // Malformed single-line JSON payload with error around column 397 + trailing commas + NaN + single quotes + unquoted keys
+    let broken_payload = concat!(
+        r#"[{"id": 1, "event": "login", "user": "alice", "region": "us-east-1", "latency_ms": 42, "status": "ok"}, "#,
+        r#"{"id": 2, "event": "purchase", "user": "bob", "region": "eu-west-1", "latency_ms": 115, "status": "ok"}, "#,
+        r#"{"id": 3, "event": "checkout", "user": "clara", "region": "ap-south-1", "latency_ms": 88, "extra_meta": "padding_to_reach_col_397_offset_in_line_1", "status": , "score": NaN, 'note': 'repaired', unquoted_flag: True, },]"#
+    );
+    fs::write(&broken_path, broken_payload).unwrap();
+    let original_bytes = fs::read(&broken_path).unwrap();
+
+    // 1. Strict load (autofix = false) must fail with "expected value at line 1 column ..." and context snippet
+    let strict_err = load_json_file_with_options(
+        "broken_events",
+        &broken_path,
+        Some(&cache_dir),
+        false,
+        false,
+    )
+    .unwrap_err();
+    let err_str = strict_err.to_string();
+    assert!(
+        err_str.contains("expected value at line 1 column") && err_str.contains("(near `"),
+        "Unexpected strict error message: {}",
+        err_str
+    );
+
+    // 2. Autofix load (autofix = true) must repair in memory and populate cache
+    let fixed_table =
+        load_json_file_with_options("broken_events", &broken_path, Some(&cache_dir), false, true)
+            .expect("should autofix malformed JSON in memory");
+    assert!(!fixed_table.loaded_from_cache);
+    assert!(fixed_table.autofixed_count >= 5);
+    assert_eq!(fixed_table.rows.len(), 3);
+    assert_eq!(fixed_table.rows[2]["status"], Value::Null);
+    assert_eq!(fixed_table.rows[2]["score"], Value::Null);
+    assert_eq!(fixed_table.rows[2]["note"], json!("repaired"));
+    assert_eq!(fixed_table.rows[2]["unquoted_flag"], json!(true));
+
+    // 3. Strict load AFTER autofix cached the dataset must still reject the malformed file
+    assert!(
+        load_json_file_with_options(
+            "broken_events",
+            &broken_path,
+            Some(&cache_dir),
+            false,
+            false
+        )
+        .is_err(),
+        "Strict mode must not serve an autofixed cache entry"
+    );
+
+    // 4. Second autofix load must hit the cache and preserve autofixed_count
+    let cached_table =
+        load_json_file_with_options("broken_events", &broken_path, Some(&cache_dir), false, true)
+            .unwrap();
+    assert!(cached_table.loaded_from_cache);
+    assert_eq!(cached_table.autofixed_count, fixed_table.autofixed_count);
+    assert_eq!(cached_table.rows.len(), 3);
+
+    // 5. Verify NDJSON with truncated line and comments also autofixes cleanly
+    let broken_ndjson_path = tmp.path().join("broken_logs.ndjson");
+    let broken_ndjson = "// Log stream\n\
+        {\"id\": 10, \"msg\": 'first', \"val\": },\n\
+        {\"id\": 20, \"msg\": \"second\", \"val\": Infinity\n\
+        {\"id\": 30, \"msg\": \"third\", \"val\": 300}\n";
+    fs::write(&broken_ndjson_path, broken_ndjson).unwrap();
+    let ndjson_table = load_json_file_with_options(
+        "broken_logs",
+        &broken_ndjson_path,
+        Some(&cache_dir),
+        false,
+        true,
+    )
+    .expect("should autofix broken NDJSON");
+    assert_eq!(ndjson_table.shape, JsonShape::Ndjson);
+    assert_eq!(ndjson_table.rows.len(), 3);
+    assert_eq!(ndjson_table.rows[0]["val"], Value::Null);
+    assert_eq!(ndjson_table.rows[1]["val"], Value::Null);
+    assert_eq!(ndjson_table.rows[2]["val"], json!(300));
+
+    // 6. Verify CLI binary without --autofix prints the --autofix hint on stderr
+    let bin = env!("CARGO_BIN_EXE_rustql");
+    let out_strict = Command::new(bin)
+        .arg("--no-cache")
+        .arg("-q")
+        .arg("SELECT id, event FROM broken_events")
+        .arg(&broken_path)
+        .output()
+        .expect("run rustql binary");
+    assert!(!out_strict.status.success());
+    let stderr_strict = String::from_utf8_lossy(&out_strict.stderr);
+    assert!(
+        stderr_strict.contains("Hint: pass --autofix"),
+        "Expected --autofix hint on stderr, got: {}",
+        stderr_strict
+    );
+
+    // 7. Verify CLI binary with --autofix succeeds, prints repair notice to stderr, and clean JSON to stdout
+    let out_fixed = Command::new(bin)
+        .arg("--autofix")
+        .arg("--no-cache")
+        .arg("--format")
+        .arg("json")
+        .arg("-q")
+        .arg("SELECT id, note, unquoted_flag FROM broken_events WHERE id = 3")
+        .arg(&broken_path)
+        .output()
+        .expect("run rustql binary with --autofix");
+    assert!(out_fixed.status.success());
+    let stderr_fixed = String::from_utf8_lossy(&out_fixed.stderr);
+    assert!(
+        stderr_fixed.contains("Autofixed") && stderr_fixed.contains("source file unchanged"),
+        "Expected autofix summary on stderr, got: {}",
+        stderr_fixed
+    );
+    let stdout_fixed: Value =
+        serde_json::from_slice(&out_fixed.stdout).expect("stdout must be valid clean JSON");
+    assert_eq!(
+        stdout_fixed,
+        json!([{"id": 3, "note": "repaired", "unquoted_flag": true}])
+    );
+
+    // 8. Verify original broken source file on disk is 100% byte-identical (strictly read-only)
+    let after_bytes = fs::read(&broken_path).unwrap();
+    assert_eq!(
+        original_bytes, after_bytes,
+        "Original broken JSON file must never be modified on disk"
+    );
+}

@@ -1111,6 +1111,11 @@ fn build_schema_entries(engine: &QueryEngine) -> Vec<(Line<'static>, String)> {
         } else {
             ""
         };
+        let autofix_tag = if table.autofixed_count > 0 {
+            format!(" [autofixed: {}]", table.autofixed_count)
+        } else {
+            String::new()
+        };
         let header_line = Line::from(vec![
             Span::styled(
                 format!("▸ {} ", table.name),
@@ -1119,7 +1124,7 @@ fn build_schema_entries(engine: &QueryEngine) -> Vec<(Line<'static>, String)> {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("({} rows{})", table.rows.len(), cache_tag),
+                format!("({} rows{}{})", table.rows.len(), cache_tag, autofix_tag),
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
@@ -2901,6 +2906,7 @@ mod tests {
             rows: std::sync::Arc::new(rows),
             columns: vec!["id".to_string(), "name".to_string(), "city".to_string()],
             loaded_from_cache: false,
+            autofixed_count: 0,
         };
         engine.register_table(table);
 
@@ -3062,6 +3068,7 @@ mod tests {
                 "long_text".to_string(),
             ],
             loaded_from_cache: false,
+            autofixed_count: 0,
         };
         engine.register_table(table);
 
@@ -3246,5 +3253,49 @@ mod tests {
         // 5. Close inspector with 'q'
         app.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.show_detail_modal);
+    }
+
+    #[test]
+    fn test_tui_displays_autofixed_badge_in_schema_browser() {
+        use crate::loader::load_json_file_with_options;
+        use std::fs;
+
+        let tmp = TempDir::new().unwrap();
+        let broken_path = tmp.path().join("broken_users.json");
+        fs::write(
+            &broken_path,
+            r#"[{"id": 1, "name": "Alice", "score": ,}, {"id": 2, "name": 'Bob', "score": NaN}]"#,
+        )
+        .unwrap();
+
+        let table = load_json_file_with_options(
+            "broken_users",
+            &broken_path,
+            Some(tmp.path()),
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(table.autofixed_count > 0);
+
+        let mut engine = QueryEngine::new();
+        engine.register_table(table);
+        let app = TuiApp::new(engine);
+
+        let schema_text: Vec<String> = app
+            .schema_entries
+            .iter()
+            .map(|(line, _)| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            schema_text.iter().any(|l| l.contains("[autofixed:")),
+            "Expected [autofixed: N] badge in TUI schema browser, got: {:?}",
+            schema_text
+        );
     }
 }

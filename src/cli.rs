@@ -46,6 +46,10 @@ pub struct CliArgs {
     /// Disable on-disk caching (keep everything in-memory only).
     #[arg(long = "no-cache")]
     pub no_cache: bool,
+
+    /// Automatically repair common JSON and NDJSON syntax errors in memory (source files remain read-only).
+    #[arg(long = "autofix")]
+    pub autofix: bool,
 }
 
 /// Format a [`QueryResult`] according to the requested [`OutputFormat`].

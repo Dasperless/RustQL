@@ -5,7 +5,7 @@
 use clap::Parser;
 use rustql::cli::{format_query_result, CliArgs};
 use rustql::engine::QueryEngine;
-use rustql::loader::{load_json_file, parse_file_spec};
+use rustql::loader::{load_json_file_with_options, parse_file_spec, LoaderError};
 use rustql::tui::run_tui;
 use std::process::ExitCode;
 
@@ -15,12 +15,29 @@ fn main() -> ExitCode {
     let mut engine = QueryEngine::new();
     for spec in &args.files {
         let (table_name, path) = parse_file_spec(spec);
-        match load_json_file(&table_name, &path, args.cache_dir.as_deref(), args.no_cache) {
+        match load_json_file_with_options(
+            &table_name,
+            &path,
+            args.cache_dir.as_deref(),
+            args.no_cache,
+            args.autofix,
+        ) {
             Ok(table) => {
+                if table.autofixed_count > 0 && args.query.is_some() {
+                    eprintln!(
+                        "Autofixed {} JSON syntax issue(s) in '{}' (in-memory; source file unchanged).",
+                        table.autofixed_count, spec
+                    );
+                }
                 engine.register_table(table);
             }
             Err(err) => {
                 eprintln!("Error loading '{}': {}", spec, err);
+                if !args.autofix && matches!(err, LoaderError::JsonParse { .. }) {
+                    eprintln!(
+                        "Hint: pass --autofix to automatically repair common JSON syntax errors in memory."
+                    );
+                }
                 return ExitCode::FAILURE;
             }
         }

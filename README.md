@@ -34,6 +34,8 @@ Built with `#![forbid(unsafe_code)]`, zero C/C++ dependencies, zero memory leaks
   - Input files are **strictly read-only** and are never modified in place.
   - Top-level JSON arrays and NDJSON files are parsed with buffered streaming readers.
   - Normalized NDJSON cache files are stored in the system temp directory (`/tmp/rustql_cache`, keyed by canonical path, file size, and nanosecond modification timestamp) using owner-only permissions (`0700` directory / `0600` files on Unix), symlink rejection, atomic rename writes, and automatic LRU cache pruning.
+- **In-Memory JSON & NDJSON Auto-Repair (`--autofix`)**:
+  - Opt-in `--autofix` flag automatically repairs common malformed JSON syntax errors in memory during loading (missing values after colons/commas like `expected value at line 1 column 397`, trailing/duplicate commas, `NaN`/`Infinity`/`undefined`/`None`/`True`/`False` literals, single-quoted strings, unquoted object keys, `//` and `/* */` comments, UTF-8 BOM, and truncated containers) while keeping source files strictly read-only.
 - **3-Pane Interactive Terminal UI (TUI)**:
   - **Left Sidebar**: Loaded tables, auto-detected JSON shape, row count, cache status, and an expandable recursive schema tree with inferred types (`Int`, `Float`, `String`, `Bool`, `Array<T>`, `Object`).
   - **Top Bar**: Guided SQL Query Editor (with live syntax/schema validation, `"Did you mean...?"` typo diagnostics, inline ghost-text completion, context-aware autocomplete dropdown, and `Ctrl+Up`/`Ctrl+Down` query history) + live Row Search box (`f`).
