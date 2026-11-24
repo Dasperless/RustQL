@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
       tag:
@@ -23,106 +21,53 @@ env:
 
 jobs:
   prepare-release:
-    name: Determine Version & Create Tag
+    name: Calculate Version & Create Tag
     runs-on: ubuntu-latest
     outputs:
-      release_tag: ${{ steps.version.outputs.release_tag }}
-      release_version: ${{ steps.version.outputs.release_version }}
-      should_release: ${{ steps.version.outputs.should_release }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+      should_release: ${{ steps.resolve.outputs.should_release }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Resolve release version and create tag on main push
-        id: version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bump version and push tag
+        id: tag_version
+        if: github.event.inputs.tag == ''
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
+          release_branches: main
+          tag_prefix: v
+
+      - name: Set release outputs
+        id: resolve
         run: |
           set -euo pipefail
-
-          # Skip automated release if commit message explicitly requests [skip release]
-          HEAD_SUBJECT=$(git log -1 --pretty=%s)
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            if [[ "$HEAD_SUBJECT" == *"[skip release]"* ]]; then
-              echo "Skipping release for commit: $HEAD_SUBJECT"
-              echo "should_release=false" >> "$GITHUB_OUTPUT"
-              echo "release_tag=" >> "$GITHUB_OUTPUT"
-              echo "release_version=" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          git fetch --tags --force
-          CARGO_VER=$(grep '^version =' Cargo.toml | head -n1 | cut -d'"' -f2)
-
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.tag }}" ]]; then
+          if [[ -n "${{ github.event.inputs.tag }}" ]]; then
             RAW_TAG="${{ github.event.inputs.tag }}"
             RELEASE_VER="${RAW_TAG#v}"
             RELEASE_TAG="v${RELEASE_VER}"
-          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            RAW_TAG="${{ github.ref_name }}"
-            RELEASE_VER="${RAW_TAG#v}"
-            RELEASE_TAG="v${RELEASE_VER}"
-            # If this tag already has a published GitHub Release (e.g. created by the push-to-main run), avoid duplicate work
-            if gh release view "$RELEASE_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-              echo "GitHub Release $RELEASE_TAG already exists; skipping duplicate tag-push run."
-              echo "should_release=false" >> "$GITHUB_OUTPUT"
-              echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-              echo "release_version=$RELEASE_VER" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+            SHOULD_RELEASE="true"
           else
-            # Push to main (or workflow_dispatch without tag input):
-            # 1. If HEAD is already tagged with v*.*.* and that release already exists, skip.
-            HEAD_TAG=$(git tag --points-at HEAD 'v*.*.*' | sort -V | tail -n1 || true)
-            if [[ -n "$HEAD_TAG" ]] && gh release view "$HEAD_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-              echo "HEAD is already tagged ($HEAD_TAG) and published; skipping."
-              echo "should_release=false" >> "$GITHUB_OUTPUT"
-              echo "release_tag=$HEAD_TAG" >> "$GITHUB_OUTPUT"
-              echo "release_version=${HEAD_TAG#v}" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-
-            # 2. Find latest existing semver tag vX.Y.Z
-            LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1 || true)
-            if [[ -z "$LATEST_TAG" ]]; then
-              RELEASE_VER="$CARGO_VER"
+            NEW_TAG="${{ steps.tag_version.outputs.new_tag }}"
+            NEW_VER="${{ steps.tag_version.outputs.new_version }}"
+            if [[ -n "$NEW_TAG" ]]; then
+              RELEASE_TAG="$NEW_TAG"
+              RELEASE_VER="${NEW_VER:-${NEW_TAG#v}}"
+              SHOULD_RELEASE="true"
             else
-              LATEST_VER="${LATEST_TAG#v}"
-              # Check if Cargo.toml version is strictly greater than LATEST_VER
-              HIGHEST=$(printf '%s\n%s\n' "$LATEST_VER" "$CARGO_VER" | sort -V | tail -n1)
-              if [[ "$CARGO_VER" != "$LATEST_VER" && "$HIGHEST" == "$CARGO_VER" ]]; then
-                RELEASE_VER="$CARGO_VER"
-              else
-                IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VER"
-                COMMITS_SINCE=$(git log "${LATEST_TAG}..HEAD" --pretty=%s || git log -1 --pretty=%s)
-                if echo "$COMMITS_SINCE" | grep -Eq '^(feat|feature)(\([^)]+\))?!?:|BREAKING CHANGE'; then
-                  MINOR=$((MINOR + 1))
-                  PATCH=0
-                else
-                  PATCH=$((PATCH + 1))
-                fi
-                RELEASE_VER="${MAJOR}.${MINOR}.${PATCH}"
-              fi
-            fi
-            RELEASE_TAG="v${RELEASE_VER}"
-
-            # 3. Create and push the Git tag pointing at the main commit if it doesn't exist yet
-            if ! git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
-              echo "Creating and pushing new tag $RELEASE_TAG on ${{ github.sha }}..."
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git tag -a "$RELEASE_TAG" "${{ github.sha }}" -m "Release $RELEASE_TAG"
-              git push origin "refs/tags/$RELEASE_TAG"
+              RELEASE_TAG=""
+              RELEASE_VER=""
+              SHOULD_RELEASE="false"
             fi
           fi
-
-          echo "Resolved release version: $RELEASE_VER (tag: $RELEASE_TAG)"
-          echo "should_release=true" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "release_version=$RELEASE_VER" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${RELEASE_VER}" >> "$GITHUB_OUTPUT"
+          echo "should_release=${SHOULD_RELEASE}" >> "$GITHUB_OUTPUT"
 
   build-release:
     name: Build Release (${{ matrix.target }})
